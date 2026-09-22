@@ -1,0 +1,62 @@
+name: PanVK G57 - WinlatorMali Android candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [winlatormali-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NDK_VERSION: 28.2.13676358
+      ANDROID_API: '35'
+      BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkgconf bison flex ripgrep \
+            clang-19 llvm-19-dev libclang-19-dev libclang-cpp19-dev \
+            libclc-19 libclc-19-dev libllvmspirvlib-19-dev libdrm-dev \
+            zlib1g-dev python3-venv patchelf
+          python3 -m venv .ci-python
+          .ci-python/bin/pip install meson==1.8.3 Mako==1.3.10 \
+            packaging==25.0 PyYAML==6.0.2 ply==3.11
+          echo "$GITHUB_WORKSPACE/.ci-python/bin" >> "$GITHUB_PATH"
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          echo "PANVK_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Build host tools and Android driver
+        run: bash .github/winlatormali/build.sh
+      - name: Validate ELF and create driver ZIP
+        run: python3 .github/winlatormali/package.py
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-G57-WinlatorMali-candidate
+          path: out-winlatormali/
+          if-no-files-found: error
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-G57-WinlatorMali-build-logs
+          path: |
+            build-winlatormali-native/meson-logs/
+            build-winlatormali-android/meson-logs/
+            ci-winlatormali/build.log
+            ci-winlatormali/provenance.txt
+          if-no-files-found: ignore

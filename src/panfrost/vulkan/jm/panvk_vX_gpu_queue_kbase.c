@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include "util/os_time.h"
 
+#define PANVK_PERF_NOLOG(...) ((void)0)
+
 /* kbase ioctl definitions */
 #define KBASE_IOCTL_TYPE 0x80
 struct kbase_ioctl_job_submit { uint64_t addr; uint32_t nr_atoms; uint32_t stride; };
@@ -106,6 +108,14 @@ static VkResult
 panvk_kbase_wait_jobs(struct panvk_device *dev,
                      const struct base_jd_atom_v2 *atoms, unsigned count)
 {
+   static uint64_t perf_calls;
+   static uint64_t perf_atoms;
+   static int64_t perf_wait_ns;
+   static int64_t perf_last_report_ns;
+
+   const int64_t perf_start_ns = os_time_get_nano();
+   const unsigned perf_atom_count = count;
+
    bool pending[256] = { false };
    for (unsigned i = 0; i < count; i++)
       pending[atoms[i].atom_number] = true;
@@ -135,7 +145,7 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
          return VK_ERROR_DEVICE_LOST;
       }
 
-      fprintf(stderr, "PANVKDBG kbase JD event: code=0x%02x atom=%u\n",
+      PANVK_PERF_NOLOG( "PANVKDBG kbase JD event: code=0x%02x atom=%u\n",
               ev.event_code, ev.atom_number);
       if (!pending[ev.atom_number]) {
          mesa_loge("kbase: unexpected JD event for atom %u", ev.atom_number);
@@ -151,6 +161,30 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
       }
    }
 
+   const int64_t perf_end_ns = os_time_get_nano();
+   perf_calls++;
+   perf_atoms += perf_atom_count;
+   perf_wait_ns += perf_end_ns - perf_start_ns;
+
+   if (perf_last_report_ns == 0)
+      perf_last_report_ns = perf_start_ns;
+
+   if (perf_end_ns - perf_last_report_ns >= 1000000000ll) {
+      fprintf(stderr,
+              "JM_WAIT calls=%llu atoms=%llu total_ms=%.3f avg_us=%.3f\\n",
+              (unsigned long long)perf_calls,
+              (unsigned long long)perf_atoms,
+              (double)perf_wait_ns / 1000000.0,
+              perf_calls ? (double)perf_wait_ns /
+                              (double)perf_calls / 1000.0
+                         : 0.0);
+
+      perf_calls = 0;
+      perf_atoms = 0;
+      perf_wait_ns = 0;
+      perf_last_report_ns = perf_end_ns;
+   }
+
    return result;
 }
 
@@ -159,12 +193,20 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                             struct panvk_cmd_buffer *cmdbuf,
                             struct panvk_batch *batch, uint32_t *bos,
                             unsigned nr_bos, uint32_t *in_fences,
-                            unsigned nr_in_fences)
+                            unsigned nr_in_fences,
+                            bool pipeline,
+                            uint8_t *next_atom_id,
+                            uint8_t previous_atom,
+                            struct base_jd_atom_v2 out_atoms[2],
+                            unsigned *out_nr_atoms)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    ASSERTED int ret;
 
-   fprintf(stderr, "PANVKDBG submit_batch kbase: batch=%p vtc=%s frag=%s bos=%u\n",
+   if (out_nr_atoms)
+      *out_nr_atoms = 0;
+
+   PANVK_PERF_NOLOG( "PANVKDBG submit_batch kbase: batch=%p vtc=%s frag=%s bos=%u\n",
            (void *)batch,
            batch->vtc_jc.first_job ? "Y" : "N",
            batch->frag_jc.first_job ? "Y" : "N", nr_bos);
@@ -173,55 +215,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
              batch->frag_jc.first_job ? "yes" : "no");
 
    if (batch->issued) {
-      /*
-       * PANVKDBG JOB384:
-       * Inspect the complete Valhall MALLOC_VERTEX job after its previous
-       * execution and BEFORE clearing the 16-byte GPU-written job status.
-       */
-      if (batch->vtc_jc.first_job) {
-         const uint32_t *j384 =
-            (const uint32_t *)(uintptr_t)batch->vtc_jc.first_job;
-
-         fprintf(stderr,
-                 "PANVKDBG JOB384_PRE_RESET batch=%p ptr=%016llx\\n",
-                 (void *)batch,
-                 (unsigned long long)batch->vtc_jc.first_job);
-
-         for (unsigned i = 0; i < 96; i += 8) {
-            fprintf(stderr,
-                    "PANVKDBG JOB384_PRE_RESET W%02u "
-                    "%08x %08x %08x %08x "
-                    "%08x %08x %08x %08x\\n",
-                    i,
-                    j384[i + 0], j384[i + 1],
-                    j384[i + 2], j384[i + 3],
-                    j384[i + 4], j384[i + 5],
-                    j384[i + 6], j384[i + 7]);
-         }
-      }
-
-      /* PANVKDBG diagnostic only: inspect GPU-written tiler context before reset. */
-      panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
-      pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
-
-      if (batch->tiler.ctx_descs.cpu) {
-         const uint32_t *tc_pre =
-            (const uint32_t *)batch->tiler.ctx_descs.cpu;
-
-         uint64_t q0 = ((uint64_t)tc_pre[1] << 32) | tc_pre[0];
-         uint64_t q1 = ((uint64_t)tc_pre[3] << 32) | tc_pre[2];
-
-         fprintf(stderr,
-                 "PANVKDBG REUSE_PRE_RESET_TC batch=%p "
-                 "q0=%016llx q1=%016llx "
-                 "w=%08x %08x %08x %08x %08x %08x %08x %08x\n",
-                 (void *)batch,
-                 (unsigned long long)q0,
-                 (unsigned long long)q1,
-                 tc_pre[0], tc_pre[1], tc_pre[2], tc_pre[3],
-                 tc_pre[4], tc_pre[5], tc_pre[6], tc_pre[7]);
-      }
-
       /* GPU writes status/context data into the descriptor pool.
        * Invalidate CPU mappings before restoring descriptors for re-submit. */
       panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
@@ -235,10 +228,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
        * (descriptor words 34..36). Restore that input state for
        * every MALLOC_VERTEX in the batch, not only first_job.
        */
-#if PAN_ARCH >= 9
-      unsigned reset_mv_idx = 0;
-#endif
-
       util_dynarray_foreach(&batch->jobs, void *, job) {
          uint32_t *j = (uint32_t *)(*job);
 
@@ -254,12 +243,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
 
 #if PAN_ARCH >= 9
          if (job_type == MALI_JOB_TYPE_MALLOC_VERTEX) {
-            fprintf(stderr,
-                    "PANVKDBG RESET_MV_ALL idx=%u ptr=%p "
-                    "before=%08x %08x %08x\\n",
-                    reset_mv_idx, *job,
-                    j[34], j[35], j[36]);
-
             /*
              * Restore the pristine Draw.Vertex array input.
              * The MALLOC_VERTEX hardware overwrites these words.
@@ -278,13 +261,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                cfg.packet = true;
             }
 
-            fprintf(stderr,
-                    "PANVKDBG RESET_MV_ALL idx=%u ptr=%p "
-                    "after=%08x %08x %08x\\n",
-                    reset_mv_idx, *job,
-                    j[34], j[35], j[36]);
-
-            reset_mv_idx++;
          }
 #endif
       }
@@ -306,7 +282,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
    /* Debug: compare the exact first job before first submit and re-submit. */
-   fprintf(stderr,
+   PANVK_PERF_NOLOG(
            "PANVKDBG PRESUB issued=%u batch=%p vtc=%016llx frag=%016llx\\n",
            batch->issued ? 1 : 0, (void *)batch,
            (unsigned long long)batch->vtc_jc.first_job,
@@ -316,7 +292,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       const uint32_t *j =
          (const uint32_t *)(uintptr_t)batch->vtc_jc.first_job;
 
-      fprintf(stderr,
+      PANVK_PERF_NOLOG(
               "PANVKDBG VTC16 "
               "%08x %08x %08x %08x "
               "%08x %08x %08x %08x "
@@ -335,7 +311,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       const uint32_t *ht =
          (const uint32_t *)&batch->tiler.heap_templ;
 
-      fprintf(stderr,
+      PANVK_PERF_NOLOG(
               "PANVKDBG HEAP gpu=%016llx "
               "%08x %08x %08x %08x "
               "%08x %08x %08x %08x "
@@ -347,7 +323,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
               h[8], h[9], h[10], h[11],
               h[12], h[13], h[14], h[15]);
 
-      fprintf(stderr,
+      PANVK_PERF_NOLOG(
               "PANVKDBG HEAPT "
               "%08x %08x %08x %08x "
               "%08x %08x %08x %08x "
@@ -363,7 +339,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       const uint32_t *tc =
          (const uint32_t *)batch->tiler.ctx_descs.cpu;
 
-      fprintf(stderr,
+      PANVK_PERF_NOLOG(
               "PANVKDBG TC16 "
               "%08x %08x %08x %08x "
               "%08x %08x %08x %08x "
@@ -381,7 +357,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       util_dynarray_foreach(&batch->jobs, void *, job) {
          const uint32_t *w = (const uint32_t *)(*job);
 
-         fprintf(stderr,
+         PANVK_PERF_NOLOG(
                  "PANVKDBG JOB issued=%u idx=%u ptr=%p "
                  "%08x %08x %08x %08x "
                  "%08x %08x %08x %08x "
@@ -403,35 +379,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       }
    }
 
-   /*
-    * PANVKDBG JOB384:
-    * Complete descriptor immediately before submission.  On the first
-    * execution this is the pristine descriptor; on issued=1 this is the
-    * descriptor after PanVK's normal status/tiler reset.
-    */
-   if (batch->vtc_jc.first_job) {
-      const uint32_t *j384 =
-         (const uint32_t *)(uintptr_t)batch->vtc_jc.first_job;
-
-      fprintf(stderr,
-              "PANVKDBG JOB384_PRESUB issued=%u batch=%p ptr=%016llx\\n",
-              batch->issued ? 1 : 0,
-              (void *)batch,
-              (unsigned long long)batch->vtc_jc.first_job);
-
-      for (unsigned i = 0; i < 96; i += 8) {
-         fprintf(stderr,
-                 "PANVKDBG JOB384_PRESUB issued=%u W%02u "
-                 "%08x %08x %08x %08x "
-                 "%08x %08x %08x %08x\\n",
-                 batch->issued ? 1 : 0, i,
-                 j384[i + 0], j384[i + 1],
-                 j384[i + 2], j384[i + 3],
-                 j384[i + 4], j384[i + 5],
-                 j384[i + 6], j384[i + 7]);
-      }
-   }
-
    /* A draw chain starts with a MALLOC_VERTEX (Valhall IDVS) job, which
     * needs both the shader cores and the tiler: submitting it with only
     * BASE_JD_REQ_T makes the job fail with JOB_AFFINITY_FAULT (0x44).
@@ -447,14 +394,16 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       if (job_type == MALI_JOB_TYPE_COMPUTE || job_type == MALI_JOB_TYPE_NULL)
          vtc_core = BASE_JD_REQ_CS;
    }
-   fprintf(stderr, "PANVKDBG core envraw vtc=%s frag=%s\n",
+   PANVK_PERF_NOLOG( "PANVKDBG core envraw vtc=%s frag=%s\n",
            getenv("PANVK_KBASE_VTC_CORE"), getenv("PANVK_KBASE_FRAG_CORE"));
    if (getenv("PANVK_KBASE_VTC_CORE"))
       vtc_core = strtoul(getenv("PANVK_KBASE_VTC_CORE"), NULL, 0);
    if (getenv("PANVK_KBASE_FRAG_CORE"))
       frag_core = strtoul(getenv("PANVK_KBASE_FRAG_CORE"), NULL, 0);
 
-   if (getenv("PANVK_SPLIT_MASK") && batch->vtc_jc.first_job &&
+   if ((!pipeline || getenv("PANVK_SPLIT_MASK")) &&
+       getenv("PANVK_SPLIT_MASK") &&
+       batch->vtc_jc.first_job &&
        batch->frag_jc.first_job) {
       /* Run the tiler atom, then mask the polygon-list pointer's tag bits in
        * the tiler context before running the fragment atom. */
@@ -485,7 +434,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
          uint64_t masked = poly & 0x0000ffffffffffffull;
          tc[0] = (uint32_t)masked;
          tc[1] = (uint32_t)(masked >> 32);
-         fprintf(stderr, "PANVKDBG mask poly %016llx -> %016llx\n",
+         PANVK_PERF_NOLOG( "PANVKDBG mask poly %016llx -> %016llx\n",
                  (unsigned long long)poly, (unsigned long long)masked);
          panvk_pool_flush_maps(&cmdbuf->desc_pool);
          pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
@@ -534,7 +483,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
          extres[i].ext_resource =
             userbuf_vas[i] | BASE_EXT_RES_ACCESS_EXCLUSIVE;
 
-         fprintf(stderr,
+         PANVK_PERF_NOLOG(
                  "PANVKDBG EXTRES[%u]=%016llx\n",
                  i,
                  (unsigned long long)extres[i].ext_resource);
@@ -542,10 +491,21 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
 
       memset(atoms, 0, sizeof(atoms));
 
+      uint8_t first_atom_id = 0;
+      uint8_t vtc_atom_id = 0;
+
       if (batch->vtc_jc.first_job) {
+         vtc_atom_id = pipeline ? (*next_atom_id)++ : 1;
+         first_atom_id = vtc_atom_id;
+
          atoms[nr_atoms].jc = batch->vtc_jc.first_job;
-         atoms[nr_atoms].atom_number = 1;
+         atoms[nr_atoms].atom_number = vtc_atom_id;
          atoms[nr_atoms].core_req = vtc_core;
+
+         if (pipeline && previous_atom) {
+            atoms[nr_atoms].pre_dep[0].atom_id = previous_atom;
+            atoms[nr_atoms].pre_dep[0].dependency_type = 2; /* ORDER */
+         }
 
          if (nr_extres) {
             atoms[nr_atoms].extres_list =
@@ -553,7 +513,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
             atoms[nr_atoms].nr_extres = nr_extres;
             atoms[nr_atoms].core_req |= BASE_JD_REQ_EXTERNAL_RESOURCES;
 
-            fprintf(stderr,
+            PANVK_PERF_NOLOG(
                     "PANVKDBG VTC EXTRES count=%u core_req=%08x list=%p\n",
                     nr_extres,
                     atoms[nr_atoms].core_req,
@@ -564,12 +524,22 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       }
 
       if (batch->frag_jc.first_job) {
+         uint8_t frag_atom_id = pipeline ? (*next_atom_id)++ : 2;
+
+         if (!first_atom_id)
+            first_atom_id = frag_atom_id;
+
          atoms[nr_atoms].jc = batch->frag_jc.first_job;
-         atoms[nr_atoms].atom_number = 2;
+         atoms[nr_atoms].atom_number = frag_atom_id;
+
          if (batch->vtc_jc.first_job) {
-            atoms[nr_atoms].pre_dep[0].atom_id = 1;
+            atoms[nr_atoms].pre_dep[0].atom_id = vtc_atom_id;
             atoms[nr_atoms].pre_dep[0].dependency_type = 1; /* DATA */
+         } else if (pipeline && previous_atom) {
+            atoms[nr_atoms].pre_dep[0].atom_id = previous_atom;
+            atoms[nr_atoms].pre_dep[0].dependency_type = 2; /* ORDER */
          }
+
          atoms[nr_atoms].core_req = frag_core;
          nr_atoms++;
       }
@@ -597,38 +567,32 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
             mesa_loge("kbase: KBASE_IOCTL_JOB_SUBMIT failed: %s", strerror(errno));
             return VK_ERROR_DEVICE_LOST;
          }
-         fprintf(stderr,
+         PANVK_PERF_NOLOG(
                  "PANVKDBG JD submit ok vtc=%s frag=%s atoms=%u vtc_core=%x frag_core=%x\n",
                  batch->vtc_jc.first_job ? "Y" : "N",
                  batch->frag_jc.first_job ? "Y" : "N", nr_atoms, vtc_core,
                  frag_core);
          mesa_logd("panvk: job bag submit ok");
 
-         VkResult result = panvk_kbase_wait_jobs(dev, atoms, nr_atoms);
+         if (pipeline) {
+            assert(out_atoms && out_nr_atoms);
+            memcpy(out_atoms, atoms, nr_atoms * sizeof(atoms[0]));
+            *out_nr_atoms = nr_atoms;
+         } else {
+            VkResult result = panvk_kbase_wait_jobs(dev, atoms, nr_atoms);
 
-         if (result == VK_SUCCESS && batch->frag_jc.first_job) {
-            fprintf(stderr,
-                    "PANVKDBG FRAG DONE: dumping native BOs\n");
-            kbase_kmod_debug_dump_native_bos(dev->kmod.dev);
-         }
-
-         if (result == VK_SUCCESS && batch->vtc_jc.first_job) {
-            fprintf(stderr,
-                    "PANVKDBG VTC DONE: dumping USER_BUFFER mappings\n");
-            kbase_kmod_debug_dump_user_buffers(dev->kmod.dev);
-         }
-
-         if (result != VK_SUCCESS) {
-            panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
-            pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
-            util_dynarray_foreach(&batch->jobs, void *, job) {
-               const uint32_t *header = *job;
-               fprintf(stderr,
-                       "PANVKDBG failed batch job: status=%08x task=%08x "
-                       "fault=%08x%08x type_index=%08x\n",
-                       header[0], header[1], header[3], header[2], header[4]);
+            if (result != VK_SUCCESS) {
+               panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
+               pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+               util_dynarray_foreach(&batch->jobs, void *, job) {
+                  const uint32_t *header = *job;
+                  PANVK_PERF_NOLOG(
+                          "PANVKDBG failed batch job: status=%08x task=%08x "
+                          "fault=%08x%08x type_index=%08x\n",
+                          header[0], header[1], header[3], header[2], header[4]);
+               }
+               return result;
             }
-            return result;
          }
       }
    }
@@ -637,19 +601,19 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
       const uint32_t *tc = (const uint32_t *)batch->tiler.ctx_descs.cpu;
       uint64_t poly = ((uint64_t)tc[1] << 32) | tc[0];
       uint64_t heap = ((uint64_t)tc[7] << 32) | tc[6];
-      fprintf(stderr,
+      PANVK_PERF_NOLOG(
               "PANVKDBG tiler ctx: poly_list=%016llx heap_desc=%016llx (tc[2]=%08x)\n",
               (unsigned long long)poly, (unsigned long long)heap, tc[2]);
       if (dev->tiler_heap && dev->tiler_heap->addr.host) {
          uint64_t base = dev->tiler_heap->addr.dev;
          uint64_t size = pan_kmod_bo_size(dev->tiler_heap->bo);
-         fprintf(stderr,
+         PANVK_PERF_NOLOG(
                  "PANVKDBG heap: base=%016llx size=%llx poly_off=%llx\n",
                  (unsigned long long)base, (unsigned long long)size,
                  (unsigned long long)(poly - base));
          if (batch->tiler.heap_desc.cpu) {
             const uint32_t *hd = (const uint32_t *)batch->tiler.heap_desc.cpu;
-            fprintf(stderr,
+            PANVK_PERF_NOLOG(
                     "PANVKDBG heap_desc: w0=%08x w1=%08x w2=%08x w3=%08x w4=%08x w5=%08x w6=%08x w7=%08x\n",
                     hd[0], hd[1], hd[2], hd[3], hd[4], hd[5], hd[6], hd[7]);
          }
@@ -662,11 +626,11 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                const uint32_t *w = (const uint32_t *)(h + page + i);
                if (!(w[0] | w[1] | w[2] | w[3]))
                   continue;
-               fprintf(stderr, "PANVKDBG poly[%05llx] %08x %08x %08x %08x\n",
+               PANVK_PERF_NOLOG( "PANVKDBG poly[%05llx] %08x %08x %08x %08x\n",
                        (unsigned long long)(page + i), w[0], w[1], w[2], w[3]);
             }
          } else {
-            fprintf(stderr, "PANVKDBG poly masked=%016llx off=%lld out of range\n",
+            PANVK_PERF_NOLOG( "PANVKDBG poly masked=%016llx off=%lld out of range\n",
                     (unsigned long long)masked, (long long)(masked - base));
          }
       }
@@ -685,7 +649,11 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
 {
    uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {};
 
-   fprintf(stderr, "PANVKDBG kbase submit: wait=%u signal=%u cmdbuf=%u\n",
+   static uint64_t jm_submit_samples;
+   static uint64_t jm_submit_batches[9];
+   unsigned jm_this_submit_batches = 0;
+
+   PANVK_PERF_NOLOG( "PANVKDBG kbase submit: wait=%u signal=%u cmdbuf=%u\n",
            submit->wait_count, submit->signal_count,
            submit->command_buffer_count);
    mesa_logd("panvk: kbase gpu_queue_submit start, cmd_count=%u",
@@ -703,6 +671,17 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
 
    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
+   const bool pipeline =
+      getenv("PANVK_JM_PIPELINE") &&
+      strcmp(getenv("PANVK_JM_PIPELINE"), "0") != 0 &&
+      !getenv("PANVK_SPLIT_MASK");
+
+   struct base_jd_atom_v2 pending_atoms[8];
+   unsigned pending_count = 0;
+   unsigned pending_batches = 0;
+   uint8_t next_atom_id = 1;
+   uint8_t previous_atom = 0;
+
    for (uint32_t j = 0; j < submit->command_buffer_count; ++j) {
       struct panvk_cmd_buffer *cmdbuf =
          container_of(submit->command_buffers[j], struct panvk_cmd_buffer, vk);
@@ -710,13 +689,84 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
       unsigned nb = 0;
       list_for_each_entry(struct panvk_batch, batch, &cmdbuf->batches, node)
          nb++;
-      fprintf(stderr, "PANVKDBG kbase submit cmdbuf[%u]: batches=%u\n", j, nb);
+      PANVK_PERF_NOLOG( "PANVKDBG kbase submit cmdbuf[%u]: batches=%u\n", j, nb);
 
       list_for_each_entry(struct panvk_batch, batch, &cmdbuf->batches, node) {
-         VkResult result = panvk_kbase_jm_submit_batch(queue, cmdbuf, batch,
-                                                      NULL, 0, NULL, 0);
+         jm_this_submit_batches++;
+
+         /*
+          * Keep at most four batches / eight atoms outstanding.
+          * Drain before IDs are recycled.
+          */
+         if (pipeline && pending_batches == 4) {
+            VkResult result =
+               panvk_kbase_wait_jobs(dev, pending_atoms, pending_count);
+            if (result != VK_SUCCESS)
+               return vk_queue_set_lost(vk_queue,
+                                        "kbase JM pipeline drain failed");
+
+            pending_count = 0;
+            pending_batches = 0;
+            next_atom_id = 1;
+            previous_atom = 0;
+         }
+
+         struct base_jd_atom_v2 emitted[2];
+         unsigned emitted_count = 0;
+
+         VkResult result =
+            panvk_kbase_jm_submit_batch(queue, cmdbuf, batch,
+                                        NULL, 0, NULL, 0,
+                                        pipeline,
+                                        &next_atom_id,
+                                        previous_atom,
+                                        emitted,
+                                        &emitted_count);
          if (result != VK_SUCCESS)
             return vk_queue_set_lost(vk_queue, "kbase JM submission failed");
+
+         if (pipeline && emitted_count) {
+            assert(pending_count + emitted_count <= ARRAY_SIZE(pending_atoms));
+
+            memcpy(&pending_atoms[pending_count], emitted,
+                   emitted_count * sizeof(emitted[0]));
+
+            pending_count += emitted_count;
+            pending_batches++;
+            previous_atom = emitted[emitted_count - 1].atom_number;
+         }
+      }
+   }
+
+   if (pipeline && pending_count) {
+      VkResult result =
+         panvk_kbase_wait_jobs(dev, pending_atoms, pending_count);
+      if (result != VK_SUCCESS)
+         return vk_queue_set_lost(vk_queue,
+                                  "kbase JM final pipeline drain failed");
+   }
+
+   {
+      unsigned bucket = MIN2(jm_this_submit_batches, 8u);
+      jm_submit_batches[bucket]++;
+      jm_submit_samples++;
+
+      if (jm_submit_samples == 200) {
+         fprintf(stderr,
+                 "JM_SUBMIT_DIST 0=%llu 1=%llu 2=%llu 3=%llu 4=%llu "
+                 "5=%llu 6=%llu 7=%llu 8+=%llu\\n",
+                 (unsigned long long)jm_submit_batches[0],
+                 (unsigned long long)jm_submit_batches[1],
+                 (unsigned long long)jm_submit_batches[2],
+                 (unsigned long long)jm_submit_batches[3],
+                 (unsigned long long)jm_submit_batches[4],
+                 (unsigned long long)jm_submit_batches[5],
+                 (unsigned long long)jm_submit_batches[6],
+                 (unsigned long long)jm_submit_batches[7],
+                 (unsigned long long)jm_submit_batches[8]);
+
+         jm_submit_samples = 0;
+         memset(jm_submit_batches, 0, sizeof(jm_submit_batches));
       }
    }
 
