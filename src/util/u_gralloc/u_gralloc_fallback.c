@@ -6,6 +6,8 @@
  */
 
 #include "u_gralloc_internal.h"
+#include "util/u_gralloc/u_gralloc_panvk_test.h"
+
 
 #include <hardware/gralloc.h>
 
@@ -144,7 +146,9 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
    out->drm_fourcc = drm_fourcc;
    out->modifier = DRM_FORMAT_MOD_INVALID;
    out->num_planes = num_planes;
-   out->fds[0] = hnd->handle->data[0];
+   out->fds[0] = u_gralloc_panvk_test_fd(hnd->handle, "gralloc-rgb");
+   if (out->fds[0] < 0)
+      return -EINVAL;
    out->strides[0] = stride;
 
 #ifdef HAS_FREEDRENO

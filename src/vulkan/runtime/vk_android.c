@@ -23,6 +23,8 @@
  */
 
 #include "vk_android.h"
+#include "util/u_gralloc/u_gralloc_panvk_test.h"
+
 
 #include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
@@ -198,7 +200,9 @@ vk_android_import_anb_memory(struct vk_device *device,
 {
    assert(anb && anb->handle && anb->handle->numFds > 0);
 
-   int dma_buf_fd = anb->handle->data[0];
+   int dma_buf_fd = u_gralloc_panvk_test_fd(anb->handle, "anb-import");
+   if (dma_buf_fd < 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
    /* Query image memory requirements for size and supported memory types */
    VkMemoryRequirements mem_reqs;
@@ -1101,13 +1105,16 @@ vk_common_GetAndroidHardwareBufferPropertiesANDROID(
                 i, handle->data[i], (long long)fd_size, seek_errno);
    }
    errno = saved_errno;
-   pProperties->allocationSize = lseek(handle->data[0], 0, SEEK_END);
+   int dma_buf_fd = u_gralloc_panvk_test_fd(handle, "ahb-properties");
+   if (dma_buf_fd < 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   pProperties->allocationSize = lseek(dma_buf_fd, 0, SEEK_END);
 
    VkMemoryFdPropertiesKHR fd_props = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
    };
    result = device->dispatch_table.GetMemoryFdPropertiesKHR(
-      device_h, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, handle->data[0],
+      device_h, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dma_buf_fd,
       &fd_props);
    if (result != VK_SUCCESS)
       return result;

@@ -4,6 +4,8 @@
  */
 
 #include "panvk_android.h"
+#include "util/u_gralloc/u_gralloc_panvk_test.h"
+
 
 #include "panvk_device.h"
 #include "panvk_image.h"
@@ -257,7 +259,9 @@ panvk_android_import_ahb_memory(VkDevice device,
    VK_FROM_HANDLE(vk_device, dev, device);
    const native_handle_t *handle = AHardwareBuffer_getNativeHandle(ahb);
    assert(handle && handle->numFds > 0);
-   int dma_buf_fd = handle->data[0];
+   int dma_buf_fd = u_gralloc_panvk_test_fd(handle, "panvk-ahb-import");
+   if (dma_buf_fd < 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    VkResult result;
 
    VkImage img_handle = VK_NULL_HANDLE;
