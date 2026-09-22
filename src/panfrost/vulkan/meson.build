@@ -7,7 +7,10 @@
 
 # PANVK_ANDROID_HAL_BRIDGE
 panvk_android_hal_inc = include_directories('../../../include/android_stub')
-panvk_android_hal_bridge = files('panvk_android_hal_bridge.c')
+panvk_android_hal_bridge = []
+if not with_platform_android
+  panvk_android_hal_bridge = files('panvk_android_hal_bridge.c')
+endif
 
 panvk_entrypoints = custom_target(
   'panvk_entrypoints.[ch]',
