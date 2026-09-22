@@ -1,3 +1,4 @@
+#include <errno.h>
 /*
  * Copyright © 2022 Intel Corporation
  *
@@ -1088,6 +1089,18 @@ vk_common_GetAndroidHardwareBufferPropertiesANDROID(
 
    const native_handle_t *handle = AHardwareBuffer_getNativeHandle(buffer);
    assert(handle && handle->numFds > 0);
+   /* PANVK_AHB_FD_DIAG: inspect handles without changing selection. */
+   const int saved_errno = errno;
+   mesa_loge("AHBCHK numFds=%d numInts=%d",
+             handle->numFds, handle->numInts);
+   for (int i = 0; i < handle->numFds; i++) {
+      errno = 0;
+      off_t fd_size = lseek(handle->data[i], 0, SEEK_END);
+      const int seek_errno = fd_size < 0 ? errno : 0;
+      mesa_loge("AHBCHK index=%d fd=%d size=%lld errno=%d",
+                i, handle->data[i], (long long)fd_size, seek_errno);
+   }
+   errno = saved_errno;
    pProperties->allocationSize = lseek(handle->data[0], 0, SEEK_END);
 
    VkMemoryFdPropertiesKHR fd_props = {
