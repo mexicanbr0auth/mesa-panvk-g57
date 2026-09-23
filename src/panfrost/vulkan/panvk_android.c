@@ -4,6 +4,7 @@
  */
 
 #include "panvk_android.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "util/u_gralloc/u_gralloc_panvk_test.h"
 
 
@@ -226,7 +227,8 @@ panvk_android_ahb_image_init(struct AHardwareBuffer *ahb,
 {
    VkResult result;
 
-   assert(img->vk.android_deferred_create_info);
+   if (!img->vk.android_deferred_create_info)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
    VkSubresourceLayout layouts[PANVK_MAX_PLANES];
@@ -234,19 +236,76 @@ panvk_android_ahb_image_init(struct AHardwareBuffer *ahb,
       vk_android_get_ahb_layout(ahb, &mod_info, layouts, PANVK_MAX_PLANES);
    if (result != VK_SUCCESS)
       return result;
-   __vk_append_struct(img->vk.android_deferred_create_info, &mod_info);
 
+   mesa_logi("AHBLAYOUT modifier=%llx planes=%u pitch=%llu offset=%llu",
+             (unsigned long long)mod_info.drmFormatModifier,
+             mod_info.drmFormatModifierPlaneCount,
+             (unsigned long long)layouts[0].rowPitch,
+             (unsigned long long)layouts[0].offset);
+
+   /* Unknown gralloc layout is not a valid explicit DRM modifier.
+    * A linear interpretation is an opt-in experiment, not layout discovery.
+    */
+   if (mod_info.drmFormatModifier == DRM_FORMAT_MOD_INVALID) {
+      const char *test = getenv("PANVK_TEST_AHB_LINEAR");
+      const char *fd_test = getenv("PANVK_TEST_AHB_FD1");
+      if (!test || strcmp(test, "1") || !fd_test || strcmp(fd_test, "1")) {
+         mesa_loge("AHBLAYOUT unknown modifier; refusing explicit import. "
+                   "RGB linear experiment: PANVK_TEST_AHB_LINEAR=1 "
+                   "with PANVK_TEST_AHB_FD1=1");
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+
+      /* Limit this experiment to the observed 2D, single-plane, 32-bit RGB
+       * case. Bounds checks do not prove that the allocation is linear.
+       */
+      if (mod_info.drmFormatModifierPlaneCount != 1 ||
+          img->vk.image_type != VK_IMAGE_TYPE_2D ||
+          img->vk.array_layers != 1 || img->vk.mip_levels != 1 ||
+          img->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+          (img->vk.format != VK_FORMAT_B8G8R8A8_UNORM &&
+           img->vk.format != VK_FORMAT_B8G8R8A8_SRGB &&
+           img->vk.format != VK_FORMAT_R8G8B8A8_UNORM &&
+           img->vk.format != VK_FORMAT_R8G8B8A8_SRGB)) {
+         mesa_loge("AHBLAYOUT linear experiment: unsupported image");
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+
+      int fd = u_gralloc_panvk_test_fd(AHardwareBuffer_getNativeHandle(ahb),
+                                      "linear-layout");
+      off_t size = fd < 0 ? -1 : lseek(fd, 0, SEEK_END);
+      const uint64_t pitch = layouts[0].rowPitch;
+      const uint64_t row_bytes = (uint64_t)img->vk.extent.width * 4;
+      const uint64_t height = img->vk.extent.height;
+      /* Division avoids overflow in offset + pitch * height. */
+      if (size <= 0 || !height || !row_bytes || pitch < row_bytes ||
+          layouts[0].offset >= (uint64_t)size ||
+          height > ((uint64_t)size - layouts[0].offset) / pitch) {
+         mesa_loge("AHBLAYOUT linear experiment: allocation bounds mismatch");
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+
+      mod_info.drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
+      mesa_logi("AHBLAYOUT TEST: assuming LINEAR, width=%u height=%u",
+                img->vk.extent.width, img->vk.extent.height);
+   }
+
+   /* Keep stack-owned extension structs out of the persistent deferred
+    * create info, including when initialization fails or is retried.
+    */
+   VkImageCreateInfo create_info = *img->vk.android_deferred_create_info;
+   mod_info.pNext = create_info.pNext;
    VkExternalMemoryImageCreateInfo external_info = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .pNext = &mod_info,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
-   __vk_append_struct(img->vk.android_deferred_create_info, &external_info);
+   create_info.pNext = &external_info;
 
-   result = panvk_image_init(img, img->vk.android_deferred_create_info);
-   if (result != VK_SUCCESS)
-      return result;
-
-   return VK_SUCCESS;
+   mesa_logi("AHBLAYOUT entering panvk_image_init");
+   result = panvk_image_init(img, &create_info);
+   mesa_logi("AHBLAYOUT panvk_image_init result=%d", result);
+   return result;
 }
 
 static VkResult
