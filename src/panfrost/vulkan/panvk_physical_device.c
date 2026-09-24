@@ -12,6 +12,9 @@
  */
 
 #include <sched.h>
+#include <limits.h>
+#include <poll.h>
+#include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +23,7 @@
 #include <fcntl.h>
 
 #include "util/disk_cache.h"
+#include "util/libsync.h"
 #include "util/cnd_monotonic.h"
 #include "util/os_misc.h"
 #include "util/os_time.h"
@@ -640,6 +644,7 @@ struct kbase_cpu_sync {
    mtx_t mutex;
    struct u_cnd_monotonic cond;
    enum kbase_cpu_sync_state state;
+   int sync_file_fd; /* Owned duplicate, or -1. */
    VkResult result;
    void *pending_data;
    panvk_kbase_sync_wait_func pending_wait;
@@ -661,6 +666,7 @@ kbase_cpu_sync_init(struct vk_device *device, struct vk_sync *sync,
       return vk_errorf(device, VK_ERROR_UNKNOWN, "cnd_init failed");
    }
 
+   ks->sync_file_fd = -1;
    ks->state = initial_value ? KBASE_CPU_SYNC_SIGNALED : KBASE_CPU_SYNC_RESET;
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
@@ -670,9 +676,19 @@ kbase_cpu_sync_init(struct vk_device *device, struct vk_sync *sync,
 }
 
 static void
+kbase_cpu_sync_close_fd(struct kbase_cpu_sync *ks)
+{
+   if (ks->sync_file_fd >= 0) {
+      close(ks->sync_file_fd);
+      ks->sync_file_fd = -1;
+   }
+}
+
+static void
 kbase_cpu_sync_finish(UNUSED struct vk_device *device, struct vk_sync *sync)
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   kbase_cpu_sync_close_fd(ks);
    u_cnd_monotonic_destroy(&ks->cond);
    mtx_destroy(&ks->mutex);
 }
@@ -683,6 +699,7 @@ kbase_cpu_sync_signal(UNUSED struct vk_device *device, struct vk_sync *sync,
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
    mtx_lock(&ks->mutex);
+   kbase_cpu_sync_close_fd(ks);
    ks->state = KBASE_CPU_SYNC_SIGNALED;
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
@@ -698,6 +715,7 @@ kbase_cpu_sync_reset(UNUSED struct vk_device *device, struct vk_sync *sync)
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
    mtx_lock(&ks->mutex);
    assert(ks->state != KBASE_CPU_SYNC_WAITING);
+   kbase_cpu_sync_close_fd(ks);
    ks->state = KBASE_CPU_SYNC_RESET;
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
@@ -727,6 +745,7 @@ panvk_kbase_sync_set_pending(
     * (e.g. a reused WSI semaphore that was CPU-waited) is legal.  Only an
     * in-progress wait on the old payload would be a genuine bug. */
    assert(ks->state != KBASE_CPU_SYNC_WAITING);
+   kbase_cpu_sync_close_fd(ks);
    ks->pending_data = data;
    ks->pending_wait = wait;
    memcpy(ks->targets, targets, sizeof(ks->targets));
@@ -865,6 +884,9 @@ kbase_cpu_sync_move(UNUSED struct vk_device *device, struct vk_sync *dst,
    assert(ks_src->state != KBASE_CPU_SYNC_WAITING);
    assert(ks_dst->state != KBASE_CPU_SYNC_WAITING);
 
+   kbase_cpu_sync_close_fd(ks_dst);
+   ks_dst->sync_file_fd = ks_src->sync_file_fd;
+   ks_src->sync_file_fd = -1;
    ks_dst->state = ks_src->state;
    ks_dst->result = ks_src->result;
    ks_dst->pending_data = ks_src->pending_data;
@@ -880,6 +902,96 @@ kbase_cpu_sync_move(UNUSED struct vk_device *device, struct vk_sync *dst,
    u_cnd_monotonic_broadcast(&ks_src->cond);
    mtx_unlock(&second->mutex);
    mtx_unlock(&first->mutex);
+   return VK_SUCCESS;
+}
+
+/* Keep imports asynchronous: queue waits resolve the acquire fence on the
+ * CPU, just like the existing kbase submission completion callback. */
+static VkResult
+kbase_cpu_sync_wait_file(void *data,
+                         UNUSED const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
+                         uint64_t abs_timeout_ns)
+{
+   struct pollfd pfd = { .fd = (int)(intptr_t)data, .events = POLLIN };
+   while (true) {
+      int timeout = -1;
+      if (abs_timeout_ns != UINT64_MAX) {
+         uint64_t now = os_time_get_nano();
+         uint64_t remaining = abs_timeout_ns > now ? abs_timeout_ns - now : 0;
+         uint64_t ms = remaining / 1000000 + (remaining % 1000000 != 0);
+         timeout = ms > INT_MAX ? INT_MAX : (int)ms;
+      }
+      int ret = poll(&pfd, 1, timeout);
+      if (ret > 0) {
+         if (pfd.revents & (POLLERR | POLLNVAL | POLLHUP))
+            return VK_ERROR_DEVICE_LOST;
+         if (pfd.revents & POLLIN)
+            return VK_SUCCESS;
+      } else if (ret < 0 && errno != EINTR && errno != EAGAIN) {
+         return VK_ERROR_DEVICE_LOST;
+      }
+      if (abs_timeout_ns != UINT64_MAX &&
+          (uint64_t)os_time_get_nano() >= abs_timeout_ns)
+         return VK_TIMEOUT;
+   }
+}
+
+static VkResult
+kbase_cpu_sync_import_sync_file(struct vk_device *device, struct vk_sync *sync,
+                                int fd)
+{
+   if (fd == -1)
+      return kbase_cpu_sync_signal(device, sync, 0);
+   if (!sync_valid_fd(fd))
+      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                       "kbase: invalid sync_file import");
+
+   /* The Vulkan runtime closes the caller's FD only after successful import. */
+   int owned_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+   if (owned_fd < 0)
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "kbase: cannot duplicate sync_file");
+
+   struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   mtx_lock(&ks->mutex);
+   assert(ks->state != KBASE_CPU_SYNC_WAITING);
+   kbase_cpu_sync_close_fd(ks);
+   ks->sync_file_fd = owned_fd;
+   ks->pending_data = (void *)(intptr_t)owned_fd;
+   ks->pending_wait = kbase_cpu_sync_wait_file;
+   memset(ks->targets, 0, sizeof(ks->targets));
+   ks->result = VK_SUCCESS;
+   ks->state = KBASE_CPU_SYNC_PENDING;
+   u_cnd_monotonic_broadcast(&ks->cond);
+   mtx_unlock(&ks->mutex);
+   return VK_SUCCESS;
+}
+
+static VkResult
+kbase_cpu_sync_export_sync_file(struct vk_device *device, struct vk_sync *sync,
+                                int *fd)
+{
+   struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   mtx_lock(&ks->mutex);
+   if (ks->sync_file_fd >= 0) {
+      int dup_fd = fcntl(ks->sync_file_fd, F_DUPFD_CLOEXEC, 0);
+      mtx_unlock(&ks->mutex);
+      if (dup_fd < 0)
+         return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                          "kbase: cannot export sync_file");
+      *fd = dup_fd;
+      return VK_SUCCESS;
+   }
+   mtx_unlock(&ks->mutex);
+
+   /* Native kbase submissions have no exportable kernel fence here.  Resolve
+    * completion first, then export Vulkan's already-signaled sentinel.  This
+    * may block; it never reports unfinished GPU work as complete. */
+   VkResult result = kbase_cpu_sync_wait_one(device, ks,
+                                            VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
+   if (result != VK_SUCCESS)
+      return result;
+   *fd = -1;
    return VK_SUCCESS;
 }
 
@@ -899,6 +1011,8 @@ static const struct vk_sync_type kbase_cpu_sync_type = {
    .reset     = kbase_cpu_sync_reset,
    .wait_many = kbase_cpu_sync_wait_many,
    .move      = kbase_cpu_sync_move,
+   .import_sync_file = kbase_cpu_sync_import_sync_file,
+   .export_sync_file = kbase_cpu_sync_export_sync_file,
 };
 
 /* Set up sync types for a kbase (non-DRM) physical device.
