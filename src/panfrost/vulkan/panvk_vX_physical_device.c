@@ -67,8 +67,9 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_external_fence_fd = false,
       .KHR_external_memory = false,
       .KHR_external_memory_fd = false,
-      .KHR_external_semaphore = false,
-      .KHR_external_semaphore_fd = false,
+      /* kbase now implements binary SYNC_FD import and export. */
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
       .KHR_format_feature_flags2 = true,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
