@@ -66,7 +66,8 @@ const struct pan_kmod_ops kbase_kmod_ops;
  * Internal device / BO / VM objects
  * ---------------------------------------------------------------------- */
 
-#define KBASE_KMOD_MAX_USER_BUFFERS 16
+#define KBASE_KMOD_MAX_USER_BUFFERS 10
+static simple_mtx_t userbuf_lock = SIMPLE_MTX_INITIALIZER;
 #define KBASE_KMOD_MAX_DEBUG_BOS 64
 
 struct kbase_kmod_dev {
@@ -1465,13 +1466,20 @@ to_kbase_mem_flags(struct kbase_kmod_dev *kbase_dev, uint32_t kmod_flags)
 }
 
 
-struct pan_kmod_bo *
-kbase_kmod_import_user_buffer(struct pan_kmod_dev *dev, void *ptr,
+static struct pan_kmod_bo *
+kbase_import_user_buffer_locked(struct pan_kmod_dev *dev, void *ptr,
                               uint64_t size)
 {
    struct kbase_kmod_dev *kbase_dev =
       container_of(dev, struct kbase_kmod_dev, base);
    const uint64_t page_size = 4096;
+
+   if (kbase_dev->is_csf ||
+       kbase_dev->userbuf_count >= KBASE_KMOD_MAX_USER_BUFFERS) {
+      mesa_loge("kbase: USER_BUFFER import exceeds JM external-resource capacity");
+      errno = ENOSPC;
+      return NULL;
+   }
 
    /*
     * PANVKDBG: USER_BUFFER kernel-size test.
@@ -1619,6 +1627,15 @@ kbase_kmod_import_user_buffer(struct pan_kmod_dev *dev, void *ptr,
            kbase_bo->gpu_mapping, bo_size);
 
    return &kbase_bo->base;
+}
+
+struct pan_kmod_bo *
+kbase_kmod_import_user_buffer(struct pan_kmod_dev *dev, void *ptr, uint64_t size)
+{
+   simple_mtx_lock(&userbuf_lock);
+   struct pan_kmod_bo *bo = kbase_import_user_buffer_locked(dev, ptr, size);
+   simple_mtx_unlock(&userbuf_lock);
+   return bo;
 }
 
 void
@@ -1779,11 +1796,13 @@ kbase_kmod_get_user_buffer_vas(struct pan_kmod_dev *dev,
    struct kbase_kmod_dev *kbase_dev =
       container_of(dev, struct kbase_kmod_dev, base);
 
+   simple_mtx_lock(&userbuf_lock);
    unsigned count = MIN2(kbase_dev->userbuf_count, max_vas);
 
-   for (unsigned i = 0; i < count; i++)
+   for (unsigned i = 0; vas && i < count; i++)
       vas[i] = kbase_dev->userbuf_vas[i];
 
+   simple_mtx_unlock(&userbuf_lock);
    return count;
 }
 
@@ -2078,6 +2097,7 @@ kbase_kmod_bo_free(struct pan_kmod_bo *bo)
    }
 
    if (kbase_bo->user_buffer) {
+      simple_mtx_lock(&userbuf_lock);
       struct kbase_kmod_dev *kbase_dev =
          container_of(bo->dev, struct kbase_kmod_dev, base);
 
@@ -2105,6 +2125,9 @@ kbase_kmod_bo_free(struct pan_kmod_bo *bo)
          break;
       }
    }
+
+   if (kbase_bo->user_buffer)
+      simple_mtx_unlock(&userbuf_lock);
 
    pan_kmod_bo_cleanup(bo);
 
