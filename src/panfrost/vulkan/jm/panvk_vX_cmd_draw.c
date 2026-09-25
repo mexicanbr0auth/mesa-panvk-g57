@@ -2219,6 +2219,19 @@ panvk_v9_build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
       cfg.cull_back_face =
          !non_polygon && (rs->cull_mode & VK_CULL_MODE_BACK_BIT) != 0;
 
+      /* Diagnostic only: preserve normal state unless explicitly requested.
+       * 1 disables culling; 2 reverses winding while keeping the cull mode.
+       * Never enable these modes as a permanent rendering workaround. */
+      const char *face_test = getenv("PANVK_TEST_FACE_MODE");
+      if (!non_polygon && face_test && face_test[0] && face_test[1] == '\0') {
+         if (face_test[0] == '1') {
+            cfg.cull_front_face = false;
+            cfg.cull_back_face = false;
+         } else if (face_test[0] == '2') {
+            cfg.front_face_ccw = !cfg.front_face_ccw;
+         }
+      }
+
       cfg.multisample_enable = msaa;
       cfg.occlusion_query = cmdbuf->state.gfx.occlusion_query.mode;
       cfg.alpha_to_coverage = alpha_to_coverage;
