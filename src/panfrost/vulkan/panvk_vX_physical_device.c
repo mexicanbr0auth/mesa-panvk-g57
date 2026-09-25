@@ -65,7 +65,8 @@ panvk_per_arch(get_physical_device_extensions)(
       /* ADHOC-DBG: hide external memory group to avoid Wine win32 ext mismatch */
       .KHR_external_fence = false,
       .KHR_external_fence_fd = false,
-      .KHR_external_memory = false,
+      .KHR_external_memory = panvk_host_import_enabled(device),
+      .EXT_external_memory_host = panvk_host_import_enabled(device),
       .KHR_external_memory_fd = false,
       /* kbase now implements binary SYNC_FD import and export. */
       .KHR_external_semaphore = true,
@@ -1297,6 +1298,9 @@ panvk_per_arch(get_physical_device_properties)(
 
       /* VK_EXT_nested_command_buffer */
       .maxCommandBufferNestingLevel = 5,
+
+      /* USER_BUFFER imports require page-aligned host allocations. */
+      .minImportedHostPointerAlignment = 4096,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,

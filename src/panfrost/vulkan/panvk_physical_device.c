@@ -2487,6 +2487,18 @@ panvk_GetPhysicalDeviceExternalBufferProperties(
       return;
    }
 
+   VK_FROM_HANDLE(panvk_physical_device, physical, physicalDevice);
+   if (pExternalBufferInfo->handleType ==
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) {
+      pExternalBufferProperties->externalMemoryProperties =
+         (VkExternalMemoryProperties){
+            .externalMemoryFeatures = panvk_host_import_enabled(physical)
+               ? VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT : 0,
+            .compatibleHandleTypes = pExternalBufferInfo->handleType,
+         };
+      return;
+   }
+
    const VkExternalMemoryHandleTypeFlags supported_handle_types =
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;

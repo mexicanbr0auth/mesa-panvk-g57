@@ -7,6 +7,8 @@
 #define PANVK_PHYSICAL_DEVICE_H
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 
 #include "panvk_instance.h"
@@ -19,6 +21,7 @@
 #include "wsi_common.h"
 
 #include "lib/kmod/pan_kmod.h"
+#include "pan_props.h"
 
 struct pan_model;
 struct pan_blendable_format;
@@ -115,7 +118,30 @@ typedef VkResult (*panvk_kbase_sync_wait_func)(
 void panvk_kbase_sync_set_pending(
    struct vk_sync *sync, void *data, panvk_kbase_sync_wait_func wait,
    const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]);
+
 #endif
+
+/* Opt-in while the JM USER_BUFFER path is validated on Android kernels. */
+static inline bool
+panvk_host_import_enabled(const struct panvk_physical_device *device)
+{
+   const char *value = getenv("PANVK_TEST_HOST_IMPORT");
+   return device->kbase_node_path[0] &&
+          pan_arch(device->kmod.dev->props.gpu_id) < 10 &&
+          value && strcmp(value, "1") == 0;
+}
+
+static inline uint32_t
+panvk_host_import_memory_types(const struct panvk_physical_device *device)
+{
+   uint32_t bits = 0;
+   for (uint32_t i = 0; i < device->memory.type_count; i++) {
+      if (device->memory.types[i].propertyFlags &
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+         bits |= 1u << i;
+   }
+   return bits;
+}
 
 void panvk_physical_device_finish(struct panvk_physical_device *device);
 

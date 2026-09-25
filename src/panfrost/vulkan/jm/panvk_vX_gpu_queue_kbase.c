@@ -403,6 +403,7 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
 
    if ((!pipeline || getenv("PANVK_SPLIT_MASK")) &&
        getenv("PANVK_SPLIT_MASK") &&
+       !kbase_kmod_get_user_buffer_vas(dev->kmod.dev, NULL, 1) &&
        batch->vtc_jc.first_job &&
        batch->frag_jc.first_job) {
       /* Run the tiler atom, then mask the polygon-list pointer's tag bits in
