@@ -210,9 +210,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
            (void *)batch,
            batch->vtc_jc.first_job ? "Y" : "N",
            batch->frag_jc.first_job ? "Y" : "N", nr_bos);
-   mesa_logd("panvk: submit_batch start vtc=%s frag=%s",
-             batch->vtc_jc.first_job ? "yes" : "no",
-             batch->frag_jc.first_job ? "yes" : "no");
 
    if (batch->issued) {
       /* GPU writes status/context data into the descriptor pool.
@@ -573,7 +570,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                  batch->vtc_jc.first_job ? "Y" : "N",
                  batch->frag_jc.first_job ? "Y" : "N", nr_atoms, vtc_core,
                  frag_core);
-         mesa_logd("panvk: job bag submit ok");
 
          if (pipeline) {
             assert(out_atoms && out_nr_atoms);
@@ -638,7 +634,6 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    }
 
    batch->issued = true;
-   mesa_logd("panvk: submit_batch end");
    return VK_SUCCESS;
 }
 
@@ -657,8 +652,6 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
    PANVK_PERF_NOLOG( "PANVKDBG kbase submit: wait=%u signal=%u cmdbuf=%u\n",
            submit->wait_count, submit->signal_count,
            submit->command_buffer_count);
-   mesa_logd("panvk: kbase gpu_queue_submit start, cmd_count=%u",
-             submit->command_buffer_count);
 
    /* On kbase there are no DRM syncobjs: resolve incoming semaphore waits on
     * the CPU before emitting the jobs. */

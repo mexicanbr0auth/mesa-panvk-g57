@@ -121,14 +121,15 @@ void panvk_kbase_sync_set_pending(
 
 #endif
 
-/* Opt-in while the JM USER_BUFFER path is validated on Android kernels. */
+/* JM USER_BUFFER imports provide host-addressable memory for WoW64.
+ * Keep an explicit opt-out for regression comparisons. */
 static inline bool
 panvk_host_import_enabled(const struct panvk_physical_device *device)
 {
    const char *value = getenv("PANVK_TEST_HOST_IMPORT");
    return device->kbase_node_path[0] &&
           pan_arch(device->kmod.dev->props.gpu_id) < 10 &&
-          value && strcmp(value, "1") == 0;
+          (!value || strcmp(value, "0") != 0);
 }
 
 static inline uint32_t
