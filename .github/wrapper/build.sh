@@ -87,7 +87,10 @@ cp -r "$WORK/SPIRV-Tools/include" "$SRC/src/vulkan/wrapper/include/spirv-tools"
 
 # 5. Cross file.  __TERMUX__ is what the wrapper tree keys its container
 #    specific WSI code (AHardwareBuffer images, X11 helpers) on, so the
-#    cross build has to define it exactly like the phone build did.  libadrenotools.so comes from the base package; Mesa's stub
+#    cross build has to define it exactly like the phone build did.
+#    fcntl.h is force included because wrapper_device_memory.c uses O_RDWR
+#    and O_CLOEXEC without including it; on the phone toolchain the header
+#    used to arrive transitively.  libadrenotools.so comes from the base package; Mesa's stub
 #    Android libraries are link-time placeholders only, resolved by the real
 #    platform libraries on the device.  -Wl,--as-needed keeps libraries we do
 #    not call (libX11, xcb-keysyms) out of DT_NEEDED.
@@ -126,8 +129,8 @@ endian = 'little'
 needs_exe_wrapper = true
 
 [built-in options]
-c_args = ['-D__TERMUX__', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
-cpp_args = ['-D__TERMUX__', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
+c_args = ['-D__TERMUX__', '-include', 'fcntl.h', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
+cpp_args = ['-D__TERMUX__', '-include', 'fcntl.h', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
 c_link_args = [{quoted}]
 cpp_link_args = [{quoted}]
 pkg_config_path = []
