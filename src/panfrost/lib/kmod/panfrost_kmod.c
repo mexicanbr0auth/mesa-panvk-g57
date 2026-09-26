@@ -658,7 +658,8 @@ static uint32_t
 panthor_kmod_perf_hw_sample_size(struct pan_kmod_dev *dev)
 {
    uint32_t hw_blk_cnt =
-      2 + pan_query_core_count(&dev->props) + pan_query_l2_slices(&dev->props);
+      2 + pan_query_core_count(&dev->props, NULL) +
+         pan_query_l2_slices(&dev->props);
    uint32_t counters_per_block = pan_query_perf_counter_per_block(&dev->props);
    uint32_t hw_blk_sz = counters_per_block * sizeof(uint32_t);
 
@@ -670,7 +671,8 @@ panfrost_kmod_perf_init_sample_layout(struct panfrost_kmod_perf_session *session
 {
    struct pan_kmod_dev *dev = session->base.dev;
    uint32_t hw_blk_cnt =
-      2 + pan_query_core_count(&dev->props) + pan_query_l2_slices(&dev->props);
+      2 + pan_query_core_count(&dev->props, NULL) +
+         pan_query_l2_slices(&dev->props);
    uint32_t hw_sample_offset = 0;
    int ret;
 

@@ -38,9 +38,13 @@ pan_query_tiler_features(const struct pan_kmod_dev_props *props)
 }
 
 unsigned
-pan_query_core_count(const struct pan_kmod_dev_props *props)
+pan_query_core_count(const struct pan_kmod_dev_props *props,
+                     unsigned *core_id_range)
 {
    /* The actual core count skips overs the gaps */
+   if (core_id_range)
+      *core_id_range = pan_query_core_id_range(props);
+
    return util_bitcount64(props->shader_present);
 }
 
