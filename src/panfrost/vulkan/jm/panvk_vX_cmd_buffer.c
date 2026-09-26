@@ -35,10 +35,11 @@
 #include "vk_format.h"
 
 #if defined(HAVE_PAN_KMOD_KBASE) && defined(PANVK_USE_KBASE)
-/* Waits for the JM jobs that are still in flight, defined in
- * panvk_vX_gpu_queue_kbase.c.  Resetting or destroying a command buffer
- * recycles the pools and the job chains the GPU may still be reading. */
-void panvk_per_arch(kbase_jm_drain)(struct panvk_device *dev);
+/* panvk_per_arch(kbase_jm_drain) is declared in panvk_vX_gpu_queue_kbase.h.
+ * Resetting or destroying a command buffer recycles the pools and the job
+ * chains the GPU may still be reading, so the JM jobs in flight must drain
+ * first. */
+#include "panvk_vX_gpu_queue_kbase.h"
 #endif
 
 static VkResult
