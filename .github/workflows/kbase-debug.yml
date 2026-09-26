@@ -3,6 +3,7 @@ name: PanVK kbase debug Mesa
 
 'on':
   push:
+    branches: [winlatormali-ci]
   pull_request:
   workflow_dispatch:
 

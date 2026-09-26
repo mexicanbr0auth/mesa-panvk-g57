@@ -134,6 +134,8 @@ PY
 
 # 6. Configure and build only the wrapper.  x11 keeps the XCB presentation path
 #    the Winlator container relies on; android adds the AHardwareBuffer path.
+#    xlib-lease only provides VK_EXT_acquire_xlib_display, which the
+#    container never uses, and it would drag libXrandr into the build.
 meson setup build-wrapper-android "$SRC" --cross-file "$WRAPPER_CROSS_FILE" \
   --prefix=/usr --libdir=lib --buildtype=release \
   -Dplatforms=android,x11 -Ddri3=enabled \
@@ -145,7 +147,7 @@ meson setup build-wrapper-android "$SRC" --cross-file "$WRAPPER_CROSS_FILE" \
   -Dopengl=false -Dgbm=disabled \
   -Dllvm=disabled -Dvalgrind=disabled -Dperfetto=false \
   -Dshared-glapi=disabled -Dexpat=disabled -Dxmlconfig=disabled \
-  -Dzstd=disabled -Dlibunwind=disabled
+  -Dzstd=disabled -Dlibunwind=disabled -Dxlib-lease=disabled
 meson compile -C build-wrapper-android -j "$BUILD_JOBS" libvulkan_wrapper wrapper_icd
 
 # 7. The patch must still be the only source change in the wrapper tree.
