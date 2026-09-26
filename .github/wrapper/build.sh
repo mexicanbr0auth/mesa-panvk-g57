@@ -148,7 +148,7 @@ meson setup build-wrapper-android "$SRC" --cross-file "$WRAPPER_CROSS_FILE" \
   -Dllvm=disabled -Dvalgrind=disabled -Dperfetto=false \
   -Dshared-glapi=disabled -Dexpat=disabled -Dxmlconfig=disabled \
   -Dzstd=disabled -Dlibunwind=disabled -Dxlib-lease=disabled
-meson compile -C build-wrapper-android -j "$BUILD_JOBS" libvulkan_wrapper wrapper_icd
+meson compile -C build-wrapper-android -j "$BUILD_JOBS" vulkan_wrapper wrapper_icd
 
 # 7. The patch must still be the only source change in the wrapper tree.
 git -C "$SRC" status --short
