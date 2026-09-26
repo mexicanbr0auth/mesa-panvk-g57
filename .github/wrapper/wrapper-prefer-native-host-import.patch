@@ -1,0 +1,18 @@
+--- a/src/vulkan/wrapper/wrapper_physical_device.c
++++ b/src/vulkan/wrapper/wrapper_physical_device.c
+@@ -62,6 +62,15 @@
+          exts->KHR_present_wait = false;
+       }
+    }
++
++   /* Prefer native host import over emulated placed mappings.  In
++    * particular, PanVK kbase can import CPU allocations but may not expose
++    * the dma-buf export entrypoints used by the placed-mapping emulation.
++    * Wine can use host import to keep WoW64 mappings below 4 GiB.
++    */
++   if (pdevice->base_supported_extensions.EXT_external_memory_host &&
++       !pdevice->base_supported_extensions.EXT_map_memory_placed)
++      exts->EXT_map_memory_placed = false;
+ 
+    // Needed by dxvk
+    exts->EXT_transform_feedback = true;

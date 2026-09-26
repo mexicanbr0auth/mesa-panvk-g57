@@ -1,0 +1,70 @@
+name: Vulkan Wrapper - host import build
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_package_url:
+        description: 'wrapper.tzst base package URL (auxiliary hook libraries)'
+        required: false
+        type: string
+  push:
+    branches: [wrapper-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  wrapper:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NDK_VERSION: 28.2.13676358
+      ANDROID_API: '26'
+      BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkgconf bison flex ripgrep \
+            glslang-tools zstd patchelf
+          python3 -m venv .ci-python
+          .ci-python/bin/pip install meson==1.8.3 Mako==1.3.10 \
+            packaging==25.0 PyYAML==6.0.2 ply==3.11
+          echo "$GITHUB_WORKSPACE/.ci-python/bin" >> "$GITHUB_PATH"
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          echo "PANVK_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Build Android wrapper
+        env:
+          WRAPPER_BASE_URL: ${{ inputs.base_package_url || '' }}
+        run: |
+          if [ -z "${WRAPPER_BASE_URL}" ]; then
+            unset WRAPPER_BASE_URL
+          fi
+          bash .github/wrapper/build.sh
+      - name: Validate ELF and create wrapper TZST
+        run: python3 .github/wrapper/package.py
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrapper-prefer-native-host-import
+          path: out-wrapper/
+          if-no-files-found: error
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrapper-build-logs
+          path: |
+            ci-wrapper/build.log
+            ci-wrapper/provenance.txt
+            build-wrapper-android/meson-logs/
+          if-no-files-found: ignore
