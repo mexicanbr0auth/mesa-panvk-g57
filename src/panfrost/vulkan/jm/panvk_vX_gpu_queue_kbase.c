@@ -10,6 +10,7 @@
 #include "panvk_priv_bo.h"
 #include "panvk_queue.h"
 #include "panvk_cmd_buffer.h"
+#include "panvk_vX_gpu_queue_kbase.h"
 #include "decode.h"
 
 #include "lib/kmod/kbase_kmod.h"
@@ -43,8 +44,9 @@ enum {
    BASE_JD_EVENT_DONE = 0x01,
 };
 
-/* Implemented here; the only caller (the kbase path of gpu_queue_submit in
- * panvk_vX_gpu_queue.c) prototypes it as panvk_per_arch(kbase_jm_submit). */
+/* Implemented here; prototyped in panvk_vX_gpu_queue_kbase.h for both this
+ * definition and the caller (the kbase path of gpu_queue_submit in
+ * panvk_vX_gpu_queue.c). */
 VkResult
 panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
                                 struct panvk_gpu_queue *queue,
