@@ -83,7 +83,7 @@ pan_perf_create(int fd)
 
    perf->constants.ext_bus_byte_size = pan_query_bus_width(&props);
    perf->constants.l2_cache_count = pan_query_l2_slices(&props);
-   perf->constants.shader_core_count = pan_query_core_count(&props);
+   perf->constants.shader_core_count = pan_query_core_count(&props, NULL);
 
    const struct pan_model *model =
       pan_get_model(props.gpu_id, props.gpu_variant);
