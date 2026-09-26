@@ -82,6 +82,7 @@ jobs:
             -Dllvm=enabled \
             -Dopengl=false \
             -Dpanfrost-kmds=kbase,panthor \
+            -Dpanvk-use-kbase=true \
             -Dplatforms=wayland \
             -Dvalgrind=disabled \
             -Dvulkan-drivers=panfrost \
