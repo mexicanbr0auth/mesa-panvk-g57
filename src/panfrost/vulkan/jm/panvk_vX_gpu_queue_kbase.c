@@ -51,15 +51,21 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
                                 struct panvk_device *dev,
                                 struct vk_queue_submit *submit);
 
+/* Waits for the jobs this backend still has in flight, if any. */
+static VkResult panvk_kbase_drain(struct panvk_device *dev);
+
 /* kbase CPU syncs are resolved by the wait_many hook when someone waits on
- * them.  The JM backend submits jobs synchronously, so by the time the
- * signal is armed the GPU work is already done. */
+ * them.  Jobs are no longer waited for inside the submit call, so the hook is
+ * what turns "the CPU observed the fence" into "the GPU work is really done". */
 static VkResult
-panvk_jm_kbase_wait_done(UNUSED void *data,
+panvk_jm_kbase_wait_done(void *data,
                          UNUSED const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
                          UNUSED uint64_t abs_timeout_ns)
 {
-   return VK_SUCCESS;
+   struct panvk_gpu_queue *queue = data;
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+
+   return panvk_kbase_drain(dev);
 }
 
 /* base_jd_atom_v2 as understood by this kernel (empirically determined:
@@ -169,7 +175,8 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
    if (perf_last_report_ns == 0)
       perf_last_report_ns = perf_start_ns;
 
-   if (perf_end_ns - perf_last_report_ns >= 1000000000ll) {
+   if (getenv("PANVK_JM_STATS") &&
+       perf_end_ns - perf_last_report_ns >= 1000000000ll) {
       fprintf(stderr,
               "JM_WAIT calls=%llu atoms=%llu total_ms=%.3f avg_us=%.3f\\n",
               (unsigned long long)perf_calls,
@@ -186,6 +193,83 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
    }
 
    return result;
+}
+
+/*
+ * Deferred job completion.
+ *
+ * The atoms live in stack memory of the submit call, so they are copied here
+ * before the ioctl returns and the CPU stops blocking on every job bag.  A
+ * window is kept instead of a single outstanding job: the driver's queue lock
+ * already serialises submits, so the tracker is a plain per-device list and
+ * never needs a lock of its own.
+ *
+ * The device wide cap is what keeps atom numbers unique.  kbase tracks at most
+ * 256 atoms per fd and reports them through the event fd, and the event loop in
+ * panvk_kbase_wait_jobs() only tolerates events for atoms it knows about, so
+ * ids are handed out monotonically and only recycled after a drain.  The cap
+ * (24 batches / 48 atoms) is far below both limits.
+ */
+#define PANVK_KBASE_ASYNC_DEFAULT 1
+#define PANVK_KBASE_ASYNC_BATCHES 24
+#define PANVK_KBASE_ASYNC_ATOMS (2 * PANVK_KBASE_ASYNC_BATCHES)
+
+static struct {
+   struct base_jd_atom_v2 atoms[PANVK_KBASE_ASYNC_ATOMS];
+   struct panvk_cmd_buffer *cmdbuf;
+   unsigned count;
+   unsigned batches;
+   uint8_t next_id;
+   bool failed;
+} panvk_kbase_pending;
+
+static bool
+panvk_kbase_async_enabled(void)
+{
+   const char *env = getenv("PANVK_JM_ASYNC");
+
+   return env ? (strcmp(env, "0") != 0) : (bool)PANVK_KBASE_ASYNC_DEFAULT;
+}
+
+/* Waits for every job still in flight.  Safe (and cheap) to call at any point
+ * where the CPU is about to read, rewrite or free memory the GPU can touch, or
+ * where it needs an ordering guarantee. */
+static VkResult
+panvk_kbase_drain(struct panvk_device *dev)
+{
+   if (!panvk_kbase_pending.count)
+      return VK_SUCCESS;
+
+   VkResult result = panvk_kbase_wait_jobs(dev, panvk_kbase_pending.atoms,
+                                           panvk_kbase_pending.count);
+
+   panvk_kbase_pending.count = 0;
+   panvk_kbase_pending.batches = 0;
+   panvk_kbase_pending.cmdbuf = NULL;
+   panvk_kbase_pending.next_id = 1;
+   if (result != VK_SUCCESS)
+      panvk_kbase_pending.failed = true;
+
+   return result;
+}
+
+static void
+panvk_kbase_pending_add(struct panvk_device *dev,
+                        struct panvk_cmd_buffer *cmdbuf,
+                        const struct base_jd_atom_v2 *atoms, unsigned count)
+{
+   if (!panvk_kbase_async_enabled()) {
+      /* Old behaviour: the caller waits for the job bag right away. */
+      panvk_kbase_wait_jobs(dev, atoms, count);
+      return;
+   }
+
+   assert(panvk_kbase_pending.count + count <=
+          ARRAY_SIZE(panvk_kbase_pending.atoms));
+   memcpy(&panvk_kbase_pending.atoms[panvk_kbase_pending.count], atoms,
+          count * sizeof(atoms[0]));
+   panvk_kbase_pending.count += count;
+   panvk_kbase_pending.cmdbuf = cmdbuf;
 }
 
 static VkResult
@@ -214,6 +298,10 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    if (batch->issued) {
       /* GPU writes status/context data into the descriptor pool.
        * Invalidate CPU mappings before restoring descriptors for re-submit. */
+      VkResult drain = panvk_kbase_drain(dev);
+      if (drain != VK_SUCCESS)
+         return drain;
+
       panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
       pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
@@ -401,8 +489,14 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    if ((!pipeline || getenv("PANVK_SPLIT_MASK")) &&
        getenv("PANVK_SPLIT_MASK") &&
        !kbase_kmod_get_user_buffer_vas(dev->kmod.dev, NULL, 1) &&
-       batch->vtc_jc.first_job &&
-       batch->frag_jc.first_job) {
+        batch->vtc_jc.first_job &&
+        batch->frag_jc.first_job) {
+      /* This path submits atoms with fixed ids, so the window must be empty
+       * before it runs. */
+      VkResult drained = panvk_kbase_drain(dev);
+      if (drained != VK_SUCCESS)
+         return drained;
+
       /* Run the tiler atom, then mask the polygon-list pointer's tag bits in
        * the tiler context before running the fragment atom. */
       struct base_jd_atom_v2 vatom = {
@@ -550,6 +644,10 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
          };
 
          if (PANVK_DEBUG(TRACE)) {
+            VkResult drain = panvk_kbase_drain(dev);
+            if (drain != VK_SUCCESS)
+               return drain;
+
             panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
             pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
             if (batch->vtc_jc.first_job)
@@ -595,6 +693,11 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    }
 
    if (getenv("PANVK_DUMP_HEAP") && batch->tiler.ctx_descs.cpu) {
+      /* The dump reads GPU written memory, so the window has to be retired. */
+      VkResult drained = panvk_kbase_drain(dev);
+      if (drained != VK_SUCCESS)
+         return drained;
+
       const uint32_t *tc = (const uint32_t *)batch->tiler.ctx_descs.cpu;
       uint64_t poly = ((uint64_t)tc[1] << 32) | tc[0];
       uint64_t heap = ((uint64_t)tc[7] << 32) | tc[6];
@@ -653,28 +756,29 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
            submit->wait_count, submit->signal_count,
            submit->command_buffer_count);
 
+   if (panvk_kbase_pending.failed)
+      return vk_queue_set_lost(vk_queue, "kbase JM job did not complete");
+
    /* On kbase there are no DRM syncobjs: resolve incoming semaphore waits on
-    * the CPU before emitting the jobs. */
+    * the CPU before emitting the jobs.  A wait is also the one point where a
+    * submit must know that the jobs handed over earlier really finished. */
    if (submit->wait_count) {
-      VkResult result = vk_sync_wait_many(&dev->vk, submit->wait_count,
-                                          submit->waits, VK_SYNC_WAIT_COMPLETE,
-                                          UINT64_MAX);
+      VkResult result = panvk_kbase_drain(dev);
+      if (result != VK_SUCCESS)
+         return vk_queue_set_lost(vk_queue, "kbase JM semaphore drain failed");
+
+      result = vk_sync_wait_many(&dev->vk, submit->wait_count, submit->waits,
+                                 VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
       if (result != VK_SUCCESS)
          return result;
    }
 
    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
-   const bool pipeline =
-      getenv("PANVK_JM_PIPELINE") &&
-      strcmp(getenv("PANVK_JM_PIPELINE"), "0") != 0 &&
-      !getenv("PANVK_SPLIT_MASK");
+   const bool async = panvk_kbase_async_enabled();
 
-   struct base_jd_atom_v2 pending_atoms[8];
-   unsigned pending_count = 0;
-   unsigned pending_batches = 0;
-   uint8_t next_atom_id = 1;
-   uint8_t previous_atom = 0;
+   struct base_jd_atom_v2 emitted[2];
+   unsigned emitted_count = 0;
 
    for (uint32_t j = 0; j < submit->command_buffer_count; ++j) {
       struct panvk_cmd_buffer *cmdbuf =
@@ -685,62 +789,46 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
          nb++;
       PANVK_PERF_NOLOG( "PANVKDBG kbase submit cmdbuf[%u]: batches=%u\n", j, nb);
 
+      /* Re-submitting a command buffer whose jobs are still running would
+       * rewrite the descriptor pool the GPU is reading. */
+      if (async && panvk_kbase_pending.count &&
+          cmdbuf == panvk_kbase_pending.cmdbuf) {
+         VkResult result = panvk_kbase_drain(dev);
+         if (result != VK_SUCCESS)
+            return vk_queue_set_lost(vk_queue,
+                                     "kbase JM pool reuse drain failed");
+      }
+
       list_for_each_entry(struct panvk_batch, batch, &cmdbuf->batches, node) {
          jm_this_submit_batches++;
 
-         /*
-          * Keep at most four batches / eight atoms outstanding.
-          * Drain before IDs are recycled.
-          */
-         if (pipeline && pending_batches == 4) {
-            VkResult result =
-               panvk_kbase_wait_jobs(dev, pending_atoms, pending_count);
+         /* Bound the window.  The drain also recycles the atom ids, which
+          * kbase only allows once the previous atom is no longer tracked. */
+         if (async && (panvk_kbase_pending.batches >=
+                          PANVK_KBASE_ASYNC_BATCHES ||
+                       panvk_kbase_pending.count + 2 >
+                          PANVK_KBASE_ASYNC_ATOMS)) {
+            VkResult result = panvk_kbase_drain(dev);
             if (result != VK_SUCCESS)
                return vk_queue_set_lost(vk_queue,
-                                        "kbase JM pipeline drain failed");
-
-            pending_count = 0;
-            pending_batches = 0;
-            next_atom_id = 1;
-            previous_atom = 0;
+                                        "kbase JM window drain failed");
          }
 
-         struct base_jd_atom_v2 emitted[2];
-         unsigned emitted_count = 0;
-
-         VkResult result =
-            panvk_kbase_jm_submit_batch(queue, cmdbuf, batch,
-                                        NULL, 0, NULL, 0,
-                                        pipeline,
-                                        &next_atom_id,
-                                        previous_atom,
-                                        emitted,
-                                        &emitted_count);
+         VkResult result = panvk_kbase_jm_submit_batch(
+            queue, cmdbuf, batch, NULL, 0, NULL, 0, /* pipeline */
+            async ? &panvk_kbase_pending.next_id : NULL,
+            panvk_kbase_pending.next_id - 1, emitted, &emitted_count);
          if (result != VK_SUCCESS)
             return vk_queue_set_lost(vk_queue, "kbase JM submission failed");
 
-         if (pipeline && emitted_count) {
-            assert(pending_count + emitted_count <= ARRAY_SIZE(pending_atoms));
-
-            memcpy(&pending_atoms[pending_count], emitted,
-                   emitted_count * sizeof(emitted[0]));
-
-            pending_count += emitted_count;
-            pending_batches++;
-            previous_atom = emitted[emitted_count - 1].atom_number;
+         if (async && emitted_count) {
+            panvk_kbase_pending_add(dev, cmdbuf, emitted, emitted_count);
+            panvk_kbase_pending.batches++;
          }
       }
    }
 
-   if (pipeline && pending_count) {
-      VkResult result =
-         panvk_kbase_wait_jobs(dev, pending_atoms, pending_count);
-      if (result != VK_SUCCESS)
-         return vk_queue_set_lost(vk_queue,
-                                  "kbase JM final pipeline drain failed");
-   }
-
-   {
+   if (getenv("PANVK_JM_STATS")) {
       unsigned bucket = MIN2(jm_this_submit_batches, 8u);
       jm_submit_batches[bucket]++;
       jm_submit_samples++;
@@ -764,9 +852,9 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
       }
    }
 
-   /* Jobs are submitted sychronously (each KBASE_IOCTL_JOB_SUBMIT is waited
-    * on before the next one), so the out fence needs no GPU-side
-    * synchronization: arm the CPU syncs to be signalled on wait. */
+   /* Jobs stay in flight after the submit returns; the CPU syncs are armed on
+    * the wait hook, which drains the window so a fence is only ever observed
+    * after the GPU work it covers has completed. */
    for (unsigned i = 0; i < submit->signal_count; i++) {
       assert(submit->signals[i].signal_value == 0);
       panvk_kbase_sync_set_pending(submit->signals[i].sync, queue,
