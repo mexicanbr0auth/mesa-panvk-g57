@@ -815,7 +815,8 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
          }
 
          VkResult result = panvk_kbase_jm_submit_batch(
-            queue, cmdbuf, batch, NULL, 0, NULL, 0, /* pipeline */
+            queue, cmdbuf, batch, NULL, 0, NULL, 0,
+            async, /* pipeline */
             async ? &panvk_kbase_pending.next_id : NULL,
             panvk_kbase_pending.next_id - 1, emitted, &emitted_count);
          if (result != VK_SUCCESS)
