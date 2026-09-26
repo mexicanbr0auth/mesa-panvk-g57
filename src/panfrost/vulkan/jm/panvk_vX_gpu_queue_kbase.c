@@ -210,7 +210,10 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
  * ids are handed out monotonically and only recycled after a drain.  The cap
  * (24 batches / 48 atoms) is far below both limits.
  */
-#define PANVK_KBASE_ASYNC_DEFAULT 1
+/* Off by default: the deferred window still shares pools that the app can
+ * recycle between submits, so it stays an opt in until it survives a
+ * clean run.  PANVK_JM_ASYNC=1 enables it for an A/B measurement. */
+#define PANVK_KBASE_ASYNC_DEFAULT 0
 #define PANVK_KBASE_ASYNC_BATCHES 24
 #define PANVK_KBASE_ASYNC_ATOMS (2 * PANVK_KBASE_ASYNC_BATCHES)
 
@@ -222,6 +225,14 @@ static struct {
    uint8_t next_id;
    bool failed;
 } panvk_kbase_pending;
+
+/* Called by the command buffer reset and destroy paths: the deferred window
+ * must be empty before the pools and job chains are recycled. */
+void
+panvk_per_arch(kbase_jm_drain)(struct panvk_device *dev)
+{
+   panvk_kbase_drain(dev);
+}
 
 static bool
 panvk_kbase_async_enabled(void)

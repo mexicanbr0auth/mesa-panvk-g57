@@ -34,6 +34,13 @@
 #include "vk_descriptor_update_template.h"
 #include "vk_format.h"
 
+#if defined(HAVE_PAN_KMOD_KBASE) && defined(PANVK_USE_KBASE)
+/* Waits for the JM jobs that are still in flight, defined in
+ * panvk_vX_gpu_queue_kbase.c.  Resetting or destroying a command buffer
+ * recycles the pools and the job chains the GPU may still be reading. */
+void panvk_per_arch(kbase_jm_drain)(struct panvk_device *dev);
+#endif
+
 static VkResult
 panvk_cmd_prepare_fragment_job(struct panvk_cmd_buffer *cmdbuf, uint64_t fbd)
 {
@@ -432,6 +439,10 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
    struct panvk_cmd_buffer *cmdbuf =
       container_of(vk_cmdbuf, struct panvk_cmd_buffer, vk);
 
+#if defined(HAVE_PAN_KMOD_KBASE) && defined(PANVK_USE_KBASE)
+   panvk_per_arch(kbase_jm_drain)(to_panvk_device(cmdbuf->vk.base.device));
+#endif
+
    vk_command_buffer_reset(&cmdbuf->vk);
 
    list_for_each_entry_safe(struct panvk_batch, batch, &cmdbuf->batches, node) {
@@ -456,6 +467,10 @@ panvk_destroy_cmdbuf(struct vk_command_buffer *vk_cmdbuf)
    struct panvk_cmd_buffer *cmdbuf =
       container_of(vk_cmdbuf, struct panvk_cmd_buffer, vk);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+
+#if defined(HAVE_PAN_KMOD_KBASE) && defined(PANVK_USE_KBASE)
+   panvk_per_arch(kbase_jm_drain)(dev);
+#endif
 
    list_for_each_entry_safe(struct panvk_batch, batch, &cmdbuf->batches, node) {
       list_del(&batch->node);
