@@ -54,43 +54,45 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
    /*
     * PANVKDBG runtime capture.
     *
-    * Diagnostic only: duplicate stderr to a persistent file when possible.
-    * If open() fails, leave the original stderr untouched.
+    * Diagnostic only: duplicate stderr to a persistent file when
+    * PANVK_DEBUG_LOG_FILE asks for it.  This is opt-in because the file
+    * capture turns every driver message of the process, including the
+    * per-frame WSI trace, into a write during the frame.  If open() fails,
+    * leave the original stderr untouched.
     */
    {
       static bool panvkdbg_filelog_initialized = false;
 
       if (!panvkdbg_filelog_initialized) {
+         const char *panvkdbg_path = getenv("PANVK_DEBUG_LOG_FILE");
+
          panvkdbg_filelog_initialized = true;
 
-         const char *panvkdbg_path =
-            getenv("PANVK_DEBUG_LOG_FILE");
+         if (panvkdbg_path && panvkdbg_path[0]) {
+            FILE *panvkdbg_file = fopen(panvkdbg_path, "a");
 
-         if (!panvkdbg_path || !panvkdbg_path[0])
-            panvkdbg_path = "/data/user/0/com.antutu.ABenchMark/files/imagefs/home/xuser/panvk_runtime.log";
+            if (panvkdbg_file) {
+               setvbuf(panvkdbg_file, NULL, _IOLBF, 0);
 
-         FILE *panvkdbg_file = fopen(panvkdbg_path, "a");
+               fprintf(panvkdbg_file,
+                       "\n===== PANVKDBG PROCESS START pid=%ld =====\n",
+                       (long)getpid());
+               fflush(panvkdbg_file);
 
-         if (panvkdbg_file) {
-            setvbuf(panvkdbg_file, NULL, _IOLBF, 0);
+               if (dup2(fileno(panvkdbg_file), STDERR_FILENO) >= 0) {
+                  setvbuf(stderr, NULL, _IOLBF, 0);
+                  fprintf(stderr,
+                          "PANVKDBG FILE_LOG path=%s pid=%ld\n",
+                          panvkdbg_path, (long)getpid());
+                  fflush(stderr);
+               }
 
-            fprintf(panvkdbg_file,
-                    "\n===== PANVKDBG PROCESS START pid=%ld =====\n",
-                    (long)getpid());
-            fflush(panvkdbg_file);
-
-            if (dup2(fileno(panvkdbg_file), STDERR_FILENO) >= 0) {
-               setvbuf(stderr, NULL, _IOLBF, 0);
-               fprintf(stderr,
-                       "PANVKDBG FILE_LOG path=%s pid=%ld\n",
-                       panvkdbg_path, (long)getpid());
-               fflush(stderr);
+               fclose(panvkdbg_file);
             }
-
-            fclose(panvkdbg_file);
          }
       }
    }
+
    struct panvk_instance *instance =
       to_panvk_instance(physical_device->vk.instance);
    const bool uses_kbase = physical_device->kbase_node_path[0] != '\0';
@@ -141,14 +143,13 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       return result;
 
    /*
-    * PANVKDBG diagnostic only:
-    * USER_BUFFER host import now exists in the kbase backend.  Enable it
-    * internally for CPU/X11 WSI without advertising the Vulkan extension yet.
+    * USER_BUFFER host import exists in the kbase backend.  The WSI blit needs
+    * it to read a host-visible swapchain image; the physical device only
+    * advertises it on the architectures where the 32-bit path was validated,
+    * so ask for it here instead of assuming.
     */
    if (uses_kbase) {
       physical_device->wsi_device.has_import_memory_host = true;
-      fprintf(stderr,
-              "PANVKDBG WSI host-import diagnostic enabled\n");
    }
 
 
