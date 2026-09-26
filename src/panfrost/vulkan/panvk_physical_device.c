@@ -1146,7 +1146,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    device->formats.blendable = pan_blendable_format_table(arch);
 
    unsigned core_count =
-      pan_query_core_count(&device->kmod.dev->props);
+      pan_query_core_count(&device->kmod.dev->props, NULL);
 
    memset(device->name, 0, sizeof(device->name));
    if (unknown_gpu)
@@ -1276,7 +1276,7 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
    device->formats.blendable = pan_blendable_format_table(arch);
 
    unsigned core_count =
-      pan_query_core_count(&device->kmod.dev->props);
+      pan_query_core_count(&device->kmod.dev->props, NULL);
 
    memset(device->name, 0, sizeof(device->name));
    if (unknown_gpu)
