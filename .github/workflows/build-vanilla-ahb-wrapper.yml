@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      WRAPPER_REPO: https://github.com/leegao/mesa-wrapper-CI.git
-      WRAPPER_SHA: 417776cc61eb137f0f22f24292f528d396c7189a
+      WRAPPER_REPO: https://github.com/leegao/bionic-vulkan-wrapper.git
+      WRAPPER_SHA: c8baafbd4f4835ca103acb55ec3ac13642b6b7e3
       PACKAGING_SHA: c5c45d88a5f5c403bbe9f4c436139433628210de
     steps:
       - uses: actions/checkout@v4
