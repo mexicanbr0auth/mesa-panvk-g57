@@ -1,0 +1,90 @@
+name: PanVK G57 - Vulkan Wrapper candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [winlatormali-ci]
+    paths:
+      - '.github/workflows/build-panvk-wrapper.yml'
+      - '.github/panvk-wrapper/**'
+      - 'tools/patch_panvk_wrapper.py'
+
+permissions:
+  contents: read
+
+jobs:
+  android-wrapper:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      WRAPPER_REPO: https://github.com/leegao/mesa-wrapper-CI.git
+      WRAPPER_SHA: 417776cc61eb137f0f22f24292f528d396c7189a
+      PACKAGING_SHA: c5c45d88a5f5c403bbe9f4c436139433628210de
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Clone pinned wrapper source
+        run: |
+          git init src
+          git -C src remote add origin "$WRAPPER_REPO"
+          git -C src fetch --depth 1 origin "$WRAPPER_SHA"
+          git -C src checkout --detach FETCH_HEAD
+          test "$(git -C src rev-parse HEAD)" = "$WRAPPER_SHA"
+
+      - name: Apply PanVK-G57 integration patch
+        run: |
+          cd src
+          python3 ../ci/tools/patch_panvk_wrapper.py
+          git diff --check
+          git diff -- src/vulkan/wrapper/wrapper_device.c src/vulkan/wrapper/wrapper_physical_device.c
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext-base file zstd
+          python -m pip install --upgrade pip
+          pip install mako PyYAML meson ninja packaging
+
+      - name: Build Android aarch64 wrapper
+        run: bash ci/.github/panvk-wrapper/build.sh "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out"
+
+      - name: Package Winlator/Ludashi wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/package"
+          mkdir -p "$ROOT/usr/lib" "$ROOT/usr/share/vulkan/icd.d"
+          cp out/libvulkan_wrapper.so "$ROOT/usr/lib/"
+          BASE="https://raw.githubusercontent.com/leegao/vulkan_wrapper_termux-packages/$PACKAGING_SHA/wrapper/usr"
+          for lib in libadrenotools.so libfile_redirect_hook.so libgsl_alloc_hook.so libhook_impl.so libmain_hook.so; do
+            curl -fL "$BASE/lib/$lib" -o "$ROOT/usr/lib/$lib"
+          done
+          curl -fL "$BASE/share/vulkan/icd.d/wrapper_icd.aarch64.json" \
+            -o "$ROOT/usr/share/vulkan/icd.d/wrapper_icd.aarch64.json"
+          tar -C "$ROOT" -cf out/PanVK-G57-wrapper.tar usr
+          zstd -19 -f out/PanVK-G57-wrapper.tar -o out/PanVK-G57-wrapper.tzst
+          sha256sum out/libvulkan_wrapper.so out/PanVK-G57-wrapper.tzst > out/SHA256SUMS.txt
+          {
+            echo "wrapper_source=$WRAPPER_SHA"
+            echo "packaging_source=$PACKAGING_SHA"
+            echo "panvk_repo_commit=$(git -C ci rev-parse HEAD)"
+          } > out/provenance.txt
+          tar -tf out/PanVK-G57-wrapper.tar
+
+      - name: Upload PanVK wrapper candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-G57-Vulkan-Wrapper-candidate
+          path: |
+            out/libvulkan_wrapper.so
+            out/libvulkan_wrapper.debug.so
+            out/PanVK-G57-wrapper.tzst
+            out/SHA256SUMS.txt
+            out/provenance.txt
+          if-no-files-found: error
