@@ -52,7 +52,7 @@ jobs:
           pip install mako PyYAML meson ninja packaging
 
       - name: Build Android aarch64 wrapper
-        run: bash ci/.github/panvk-wrapper/build.sh "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out"
+        run: bash ci/.github/panvk-wrapper/build-bionic.sh "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out"
 
       - name: Package Winlator/Ludashi wrapper
         shell: bash
