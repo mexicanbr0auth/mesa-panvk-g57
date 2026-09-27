@@ -5,7 +5,7 @@ on:
   push:
     branches: [winlatormali-ci]
     paths:
-      - '.github/workflows/build-panvk-wrapper.yml'
+      - '.github/workflows/build-vanilla-ahb-wrapper.yml'
       - '.github/panvk-wrapper/**'
       - 'tools/patch_vanilla_ahb_wrapper.py'
 
