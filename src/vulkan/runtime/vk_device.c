@@ -470,15 +470,13 @@ vk_common_GetDeviceProcAddr(VkDevice _device,
    VK_FROM_HANDLE(vk_device, device, _device);
    PFN_vkVoidFunction fn = vk_device_get_proc_addr(device, pName);
 
-   if (pName &&
-       (!strcmp(pName, "vkCreateSwapchainKHR") ||
-        !strcmp(pName, "vkDestroySwapchainKHR") ||
-        !strcmp(pName, "vkGetSwapchainImagesKHR") ||
-        !strcmp(pName, "vkAcquireNextImageKHR") ||
-        !strcmp(pName, "vkAcquireNextImage2KHR") ||
-        !strcmp(pName, "vkQueuePresentKHR"))) {
+   /* WinlatorMali diagnostic: the 32-bit WoW64 bridge currently exits
+    * immediately after resolving device entrypoints.  Log every lookup so
+    * we can identify the exact hand-off without changing dispatch behavior.
+    */
+   if (pName) {
       fprintf(stderr,
-              "PANVKDBG GDPA name=%s fn=%p device=%p swapchain_ext=%d\\n",
+              "PANVKDBG GDPA_ALL name=%s fn=%p device=%p swapchain_ext=%d\\n",
               pName, (void *)fn, (void *)device,
               device->enabled_extensions.KHR_swapchain);
       fflush(stderr);
