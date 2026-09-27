@@ -153,8 +153,11 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
          return VK_ERROR_DEVICE_LOST;
       }
 
-      PANVK_PERF_NOLOG( "PANVKDBG kbase JD event: code=0x%02x atom=%u\n",
-              ev.event_code, ev.atom_number);
+      fprintf(stderr, "PANVKJM EVENT code=0x%02x atom=%u udata=%016llx:%016llx\n",
+              ev.event_code, ev.atom_number,
+              (unsigned long long)ev.udata[0],
+              (unsigned long long)ev.udata[1]);
+      fflush(stderr);
       if (!pending[ev.atom_number]) {
          mesa_loge("kbase: unexpected JD event for atom %u", ev.atom_number);
          return VK_ERROR_DEVICE_LOST;
@@ -671,6 +674,16 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                             to_panvk_physical_device(dev->vk.physical)->kmod.dev->props.gpu_id);
          }
 
+         fprintf(stderr, "PANVKJM BAG atoms=%u pipeline=%u", nr_atoms, pipeline ? 1 : 0);
+         for (unsigned ai = 0; ai < nr_atoms; ai++)
+            fprintf(stderr, " atom[%u]={id=%u core=0x%x dep=%u/%u jc=%016llx}",
+                    ai, atoms[ai].atom_number, atoms[ai].core_req,
+                    atoms[ai].pre_dep[0].atom_id,
+                    atoms[ai].pre_dep[0].dependency_type,
+                    (unsigned long long)atoms[ai].jc);
+         fprintf(stderr, "\n");
+         fflush(stderr);
+
          ret = pan_kmod_ioctl(dev->kmod.dev->fd, KBASE_IOCTL_JOB_SUBMIT, &submit);
          if (ret) {
             mesa_loge("kbase: KBASE_IOCTL_JOB_SUBMIT failed: %s", strerror(errno));
@@ -768,6 +781,12 @@ panvk_per_arch(kbase_jm_submit)(struct vk_queue *vk_queue,
    PANVK_PERF_NOLOG( "PANVKDBG kbase submit: wait=%u signal=%u cmdbuf=%u\n",
            submit->wait_count, submit->signal_count,
            submit->command_buffer_count);
+
+   fprintf(stderr, "PANVKJM SUBMIT waits=%u signals=%u cmdbufs=%u pending=%u batches=%u failed=%u\n",
+           submit->wait_count, submit->signal_count, submit->command_buffer_count,
+           panvk_kbase_pending.count, panvk_kbase_pending.batches,
+           panvk_kbase_pending.failed ? 1 : 0);
+   fflush(stderr);
 
    if (panvk_kbase_pending.failed)
       return vk_queue_set_lost(vk_queue, "kbase JM job did not complete");

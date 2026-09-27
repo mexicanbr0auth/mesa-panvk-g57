@@ -42,6 +42,38 @@ repl = """         WRAPPER_LOG(info, "PANVKWRAP queue underlying handle=%p",
 if needle not in s:
     raise SystemExit("queue result patch point not found")
 s = s.replace(needle, repl, 1)
+needle = """   result = queue->device->dispatch_table.QueueSubmit(
+      queue->dispatch_handle, submitCount, wrapper_submits, fence);"""
+repl = """   WRAPPER_LOG(info, "PANVKWRAP QueueSubmit begin count=%u queue=%p underlying=%p fence=%p",
+               submitCount, (void *)_queue, (void *)queue->dispatch_handle, (void *)fence);
+   for (uint32_t i = 0; i < submitCount; i++)
+      WRAPPER_LOG(info, "PANVKWRAP QueueSubmit[%u] waits=%u cmds=%u signals=%u",
+                  i, pSubmits[i].waitSemaphoreCount,
+                  pSubmits[i].commandBufferCount,
+                  pSubmits[i].signalSemaphoreCount);
+   result = queue->device->dispatch_table.QueueSubmit(
+      queue->dispatch_handle, submitCount, wrapper_submits, fence);
+   WRAPPER_LOG(info, "PANVKWRAP QueueSubmit end result=%d", result);"""
+if needle not in s:
+    raise SystemExit("QueueSubmit patch point not found")
+s = s.replace(needle, repl, 1)
+
+needle = """   result = queue->device->dispatch_table.QueueSubmit2(
+      queue->dispatch_handle, submitCount, wrapper_submits, fence);"""
+repl = """   WRAPPER_LOG(info, "PANVKWRAP QueueSubmit2 begin count=%u queue=%p underlying=%p fence=%p",
+               submitCount, (void *)_queue, (void *)queue->dispatch_handle, (void *)fence);
+   for (uint32_t i = 0; i < submitCount; i++)
+      WRAPPER_LOG(info, "PANVKWRAP QueueSubmit2[%u] waits=%u cmds=%u signals=%u",
+                  i, pSubmits[i].waitSemaphoreInfoCount,
+                  pSubmits[i].commandBufferInfoCount,
+                  pSubmits[i].signalSemaphoreInfoCount);
+   result = queue->device->dispatch_table.QueueSubmit2(
+      queue->dispatch_handle, submitCount, wrapper_submits, fence);
+   WRAPPER_LOG(info, "PANVKWRAP QueueSubmit2 end result=%d", result);"""
+if needle not in s:
+    raise SystemExit("QueueSubmit2 patch point not found")
+s = s.replace(needle, repl, 1)
+
 p.write_text(s)
 
 p = Path("src/vulkan/wrapper/wrapper_physical_device.c")
