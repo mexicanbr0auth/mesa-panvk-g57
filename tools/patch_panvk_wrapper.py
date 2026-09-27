@@ -167,3 +167,84 @@ if needle not in s:
     raise SystemExit("X11 SelectInput cleanup patch point not found")
 s = s.replace(needle, repl, 1)
 p.write_text(s)
+
+# Keep XID allocation coherent when WSI is using an Xlib Display shared with Wine.
+p = Path("src/vulkan/wsi/wsi_common_x11.c")
+s = p.read_text()
+needle = """   xcb_connection_t *                           conn;
+   xcb_window_t                                 window;"""
+repl = """   xcb_connection_t *                           conn;
+   Display *                                    xlib_dpy;
+   xcb_window_t                                 window;"""
+if needle not in s:
+    raise SystemExit("x11_swapchain conn field patch point not found")
+s = s.replace(needle, repl, 1)
+
+needle = """};
+VK_DEFINE_NONDISP_HANDLE_CASTS(x11_swapchain, base.base, VkSwapchainKHR,"""
+repl = """};
+
+static inline uint32_t
+panvk_x11_generate_id(struct x11_swapchain *chain)
+{
+   if (chain->xlib_dpy) {
+      uint32_t id = (uint32_t)XAllocID(chain->xlib_dpy);
+      fprintf(stderr, \"PANVKWSI XID xlib=0x%x\\n\", id);
+      return id;
+   }
+
+   uint32_t id = xcb_generate_id(chain->conn);
+   fprintf(stderr, \"PANVKWSI XID xcb=0x%x\\n\", id);
+   return id;
+}
+
+VK_DEFINE_NONDISP_HANDLE_CASTS(x11_swapchain, base.base, VkSwapchainKHR,"""
+if needle not in s:
+    raise SystemExit("x11_swapchain helper insertion point not found")
+s = s.replace(needle, repl, 1)
+
+# Every XID owned by the swapchain must use the same allocator.
+s = s.replace("xcb_generate_id(chain->conn)", "panvk_x11_generate_id(chain)")
+# The replacement above also touched the helper fallback; restore it there.
+s = s.replace("uint32_t id = panvk_x11_generate_id(chain);\n   fprintf(stderr, \"PANVKWSI XID xcb=0x%x", "uint32_t id = xcb_generate_id(chain->conn);\n   fprintf(stderr, \"PANVKWSI XID xcb=0x%x", 1)
+
+needle = """   chain->conn = conn;
+   chain->window = window;"""
+repl = """   chain->conn = conn;
+   chain->xlib_dpy = icd_surface->platform == VK_ICD_WSI_PLATFORM_XLIB ?
+      ((VkIcdSurfaceXlib *)icd_surface)->dpy : NULL;
+   fprintf(stderr, \"PANVKWSI swapchain connection platform=%u xlib=%p conn=%p\\n\",
+           icd_surface->platform, (void *)chain->xlib_dpy, (void *)chain->conn);
+   chain->window = window;"""
+if needle not in s:
+    raise SystemExit("xlib display assignment patch point not found")
+s = s.replace(needle, repl, 1)
+
+# Make SYNC CreateFence synchronous too; this was the observed X request 152/14.
+needle = """   image->sync_fence = panvk_x11_generate_id(chain);
+   xcb_sync_create_fence(chain->conn, image->pixmap, image->sync_fence, false);
+   xcb_sync_trigger_fence(chain->conn, image->sync_fence);
+   
+   return VK_SUCCESS;"""
+repl = """   image->sync_fence = panvk_x11_generate_id(chain);
+   cookie = xcb_sync_create_fence_checked(chain->conn, image->pixmap,
+                                          image->sync_fence, false);
+   error = xcb_request_check(chain->conn, cookie);
+   if (error != NULL) {
+      fprintf(stderr,
+              \"PANVKWSI CreateFence failed err=%u major=%u minor=%u resource=0x%x seq=%u pixmap=0x%x fence=0x%x\\n\",
+              error->error_code, error->major_code, error->minor_code,
+              error->resource_id, error->sequence, image->pixmap,
+              image->sync_fence);
+      free(error);
+      goto fail_image;
+   }
+   fprintf(stderr, \"PANVKWSI CreateFence ok pixmap=0x%x fence=0x%x\\n\",
+           image->pixmap, image->sync_fence);
+   xcb_sync_trigger_fence(chain->conn, image->sync_fence);
+
+   return VK_SUCCESS;"""
+if needle not in s:
+    raise SystemExit("SYNC CreateFence patch point not found")
+s = s.replace(needle, repl, 1)
+p.write_text(s)
