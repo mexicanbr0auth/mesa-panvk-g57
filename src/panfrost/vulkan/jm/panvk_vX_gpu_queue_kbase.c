@@ -674,7 +674,18 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
                             to_panvk_physical_device(dev->vk.physical)->kmod.dev->props.gpu_id);
          }
 
-         fprintf(stderr, "PANVKJM BAG atoms=%u pipeline=%u", nr_atoms, pipeline ? 1 : 0);
+         uint8_t dbg_vtc_type = 0xff, dbg_frag_type = 0xff;
+         if (batch->vtc_jc.first_job) {
+            const uint32_t *dbg = (const uint32_t *)(uintptr_t)batch->vtc_jc.first_job;
+            dbg_vtc_type = (dbg[4] >> 1) & 0x7f;
+         }
+         if (batch->frag_jc.first_job) {
+            const uint32_t *dbg = (const uint32_t *)(uintptr_t)batch->frag_jc.first_job;
+            dbg_frag_type = (dbg[4] >> 1) & 0x7f;
+         }
+         fprintf(stderr,
+                 "PANVKJM BAG atoms=%u pipeline=%u vtc_type=0x%02x frag_type=0x%02x",
+                 nr_atoms, pipeline ? 1 : 0, dbg_vtc_type, dbg_frag_type);
          for (unsigned ai = 0; ai < nr_atoms; ai++)
             fprintf(stderr, " atom[%u]={id=%u core=0x%x dep=%u/%u jc=%016llx}",
                     ai, atoms[ai].atom_number, atoms[ai].core_req,

@@ -84,3 +84,86 @@ repl = """     WRAPPER_LOG(info, "PANVKWRAP PanVK-G57 integration build v1");
 if needle not in s:
     raise SystemExit("physical device patch point not found")
 p.write_text(s.replace(needle, repl, 1))
+
+
+# PanVK-G57 X11/Present diagnostics: make Present protocol errors synchronous
+# so they cannot escape later as a fatal asynchronous X error.
+p = Path("src/vulkan/wsi/wsi_common_x11.c")
+s = p.read_text()
+needle = """   chain->event_id = xcb_generate_id(chain->conn);
+   uint32_t event_mask = XCB_PRESENT_EVENT_MASK_CONFIGURE_NOTIFY |
+                         XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY;
+   if (!chain->base.image_info.explicit_sync)
+      event_mask |= XCB_PRESENT_EVENT_MASK_IDLE_NOTIFY;
+   xcb_present_select_input(chain->conn, chain->event_id, chain->window, event_mask);
+
+   /* Create an XCB event queue to hold present events outside of the usual
+    * application event queue
+    */
+   chain->special_event =
+      xcb_register_for_special_xge(chain->conn, &xcb_present_id,
+                                   chain->event_id, NULL);"""
+repl = """   chain->event_id = xcb_generate_id(chain->conn);
+   uint32_t event_mask = XCB_PRESENT_EVENT_MASK_CONFIGURE_NOTIFY |
+                         XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY;
+   if (!chain->base.image_info.explicit_sync)
+      event_mask |= XCB_PRESENT_EVENT_MASK_IDLE_NOTIFY;
+   xcb_void_cookie_t panvk_select_cookie =
+      xcb_present_select_input_checked(chain->conn, chain->event_id,
+                                       chain->window, event_mask);
+   xcb_generic_error_t *panvk_select_error =
+      xcb_request_check(chain->conn, panvk_select_cookie);
+   if (panvk_select_error) {
+      fprintf(stderr,
+              \"PANVKWSI SelectInput CREATE failed err=%u major=%u minor=%u resource=0x%x seq=%u event=0x%x window=0x%x mask=0x%x\\n\",
+              panvk_select_error->error_code, panvk_select_error->major_code,
+              panvk_select_error->minor_code, panvk_select_error->resource_id,
+              panvk_select_error->sequence, chain->event_id, chain->window,
+              event_mask);
+      free(panvk_select_error);
+      result = VK_ERROR_SURFACE_LOST_KHR;
+      goto fail_register;
+   }
+   fprintf(stderr,
+           \"PANVKWSI SelectInput CREATE ok event=0x%x window=0x%x mask=0x%x\\n\",
+           chain->event_id, chain->window, event_mask);
+
+   /* Create an XCB event queue to hold present events outside of the usual
+    * application event queue
+    */
+   chain->special_event =
+      xcb_register_for_special_xge(chain->conn, &xcb_present_id,
+                                   chain->event_id, NULL);
+   if (!chain->special_event) {
+      fprintf(stderr, \"PANVKWSI special XGE registration failed event=0x%x\\n\",
+              chain->event_id);
+      result = VK_ERROR_SURFACE_LOST_KHR;
+      goto fail_register;
+   }"""
+if needle not in s:
+    raise SystemExit("X11 SelectInput create patch point not found")
+s = s.replace(needle, repl, 1)
+
+needle = """   cookie = xcb_present_select_input_checked(chain->conn, chain->event_id,
+                                             chain->window,
+                                             XCB_PRESENT_EVENT_MASK_NO_EVENT);
+   xcb_discard_reply(chain->conn, cookie.sequence);"""
+repl = """   cookie = xcb_present_select_input_checked(chain->conn, chain->event_id,
+                                             chain->window,
+                                             XCB_PRESENT_EVENT_MASK_NO_EVENT);
+   xcb_generic_error_t *panvk_cleanup_error = xcb_request_check(chain->conn, cookie);
+   if (panvk_cleanup_error) {
+      fprintf(stderr,
+              \"PANVKWSI SelectInput CLEANUP failed err=%u major=%u minor=%u resource=0x%x seq=%u event=0x%x window=0x%x\\n\",
+              panvk_cleanup_error->error_code, panvk_cleanup_error->major_code,
+              panvk_cleanup_error->minor_code, panvk_cleanup_error->resource_id,
+              panvk_cleanup_error->sequence, chain->event_id, chain->window);
+      free(panvk_cleanup_error);
+   } else {
+      fprintf(stderr, \"PANVKWSI SelectInput CLEANUP ok event=0x%x window=0x%x\\n\",
+              chain->event_id, chain->window);
+   }"""
+if needle not in s:
+    raise SystemExit("X11 SelectInput cleanup patch point not found")
+s = s.replace(needle, repl, 1)
+p.write_text(s)
