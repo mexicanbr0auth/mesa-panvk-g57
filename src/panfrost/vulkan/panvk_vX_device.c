@@ -359,10 +359,10 @@ panvk_queue_create(struct panvk_device *dev,
                    uint32_t queue_idx,
                    struct vk_queue **out_queue)
 {
+#ifdef HAVE_PAN_KMOD_KBASE
    fprintf(stderr, "PANVKDBG panvk_queue_create: family=%u, idx=%u, count=%u, kbase_stub=%d\n",
            create_info->queueFamilyIndex, queue_idx, create_info->queueCount,
            panvk_kbase_stub_queues(dev));
-#ifdef HAVE_PAN_KMOD_KBASE
    if (panvk_kbase_stub_queues(dev) &&
        create_info->queueFamilyIndex == PANVK_QUEUE_FAMILY_BIND)
       return panvk_kbase_stub_queue_create(dev, create_info, queue_idx,
