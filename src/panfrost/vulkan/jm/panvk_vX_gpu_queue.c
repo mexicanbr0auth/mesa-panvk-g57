@@ -253,8 +253,10 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
    const bool is_kbase = false;
 #endif
 
+#ifdef HAVE_PAN_KMOD_KBASE
    if (is_kbase && !getenv("PANVK_FORCE_ALT_SUBMIT"))
       return panvk_per_arch(kbase_jm_submit)(vk_queue, queue, dev, submit);
+#endif
 
    mesa_logd("panvk: gpu_queue_submit start, cmd_count=%u", submit->command_buffer_count);
 
