@@ -1,6 +1,9 @@
 #include <hardware/hardware.h>
 #include <hardware/hwvulkan.h>
 #include <vulkan/vulkan.h>
+#include <android/log.h>
+
+#define PANVK_HAL_LOG(...) __android_log_print(ANDROID_LOG_INFO, "PanVK-PPSSPP", __VA_ARGS__)
 
 extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
@@ -18,6 +21,7 @@ panvk_hal_EnumerateInstanceExtensionProperties(
    uint32_t *pPropertyCount,
    VkExtensionProperties *pProperties)
 {
+   PANVK_HAL_LOG("HAL EnumerateInstanceExtensionProperties layer=%s", pLayerName ? pLayerName : "<null>");
    PFN_vkEnumerateInstanceExtensionProperties fn =
       (PFN_vkEnumerateInstanceExtensionProperties)
       vk_icdGetInstanceProcAddr(
@@ -36,6 +40,7 @@ panvk_hal_CreateInstance(
    const VkAllocationCallbacks *pAllocator,
    VkInstance *pInstance)
 {
+   PANVK_HAL_LOG("HAL CreateInstance createInfo=%p allocator=%p", pCreateInfo, pAllocator);
    PFN_vkCreateInstance fn =
       (PFN_vkCreateInstance)
       vk_icdGetInstanceProcAddr(
@@ -53,6 +58,7 @@ panvk_hal_GetInstanceProcAddr(
    VkInstance instance,
    const char *pName)
 {
+   PANVK_HAL_LOG("HAL GetInstanceProcAddr instance=%p name=%s", (void *)instance, pName ? pName : "<null>");
    return vk_icdGetInstanceProcAddr(instance, pName);
 }
 
@@ -84,6 +90,8 @@ panvk_hal_module_open(
 
    if (!device)
       return -1;
+
+   PANVK_HAL_LOG("HAL module open module=%p id=%s", module, id ? id : "<null>");
 
    panvk_hal_device.common.module =
       (struct hw_module_t *)module;

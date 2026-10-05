@@ -17,6 +17,9 @@ out = ROOT / 'out-winlatormali'
 out.mkdir(exist_ok=True)
 so = out / 'libvulkan_panfrost.so'
 shutil.copy2(ROOT / 'build-winlatormali-android/src/panfrost/vulkan/libvulkan_panfrost.so', so)
+# Preserve the unstripped ELF so Android crash PCs can be symbolized exactly.
+debug_so = out / 'libvulkan_panfrost.debug.so'
+shutil.copy2(so, debug_so)
 
 # Meson may embed paths to link-time Android stub libraries. Never ship them.
 subprocess.run(['patchelf', '--remove-rpath', str(so)], check=True)
