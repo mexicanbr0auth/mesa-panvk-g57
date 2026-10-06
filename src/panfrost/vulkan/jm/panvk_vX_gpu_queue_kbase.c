@@ -24,9 +24,17 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "util/os_time.h"
 
 #define PANVK_PERF_NOLOG(...) ((void)0)
+#ifdef __ANDROID__
+#define PANVK_JM_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "PanVK-JM", __VA_ARGS__)
+#else
+#define PANVK_JM_LOGE(...) mesa_loge(__VA_ARGS__)
+#endif
 
 /* kbase ioctl definitions */
 #define KBASE_IOCTL_TYPE 0x80
@@ -153,11 +161,10 @@ panvk_kbase_wait_jobs(struct panvk_device *dev,
          return VK_ERROR_DEVICE_LOST;
       }
 
-      fprintf(stderr, "PANVKJM EVENT code=0x%02x atom=%u udata=%016llx:%016llx\n",
-              ev.event_code, ev.atom_number,
-              (unsigned long long)ev.udata[0],
-              (unsigned long long)ev.udata[1]);
-      fflush(stderr);
+      PANVK_JM_LOGE("JD_EVENT code=0x%02x atom=%u udata=%016llx:%016llx",
+                    ev.event_code, ev.atom_number,
+                    (unsigned long long)ev.udata[0],
+                    (unsigned long long)ev.udata[1]);
       if (!pending[ev.atom_number]) {
          mesa_loge("kbase: unexpected JD event for atom %u", ev.atom_number);
          return VK_ERROR_DEVICE_LOST;
