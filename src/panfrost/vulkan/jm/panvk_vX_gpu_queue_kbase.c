@@ -481,10 +481,11 @@ panvk_kbase_jm_submit_batch(struct panvk_gpu_queue *queue,
    }
 
    /* A draw chain starts with a MALLOC_VERTEX (Valhall IDVS) job, which
-    * needs both the shader cores and the tiler: submitting it with only
-    * BASE_JD_REQ_T makes the job fail with JOB_AFFINITY_FAULT (0x44).
+    * needs vertex/compute, vertex and tiler requirements on kbase. Keep the
+    * V bit as well as CS|T; omitting it can make the first graphics draw
+    * fail with a JD fault/DEVICE_LOST on Bifrost G57.
     * Compute/NULL chains stay on the vertex/compute slot. */
-   uint32_t vtc_core = BASE_JD_REQ_CS | BASE_JD_REQ_T;
+   uint32_t vtc_core = BASE_JD_REQ_CS | BASE_JD_REQ_T | BASE_JD_REQ_V;
    uint32_t frag_core = BASE_JD_REQ_FS;
    if (batch->vtc_jc.first_job) {
       /* Pick the job slot from the first job in the chain: compute (and
